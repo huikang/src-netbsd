@@ -1,4 +1,4 @@
-/* $NetBSD: if_lmc.c,v 1.61 2016/06/10 13:31:43 ozaki-r Exp $ */
+/* $NetBSD: if_lmc.c,v 1.63 2017/01/24 09:05:28 ozaki-r Exp $ */
 
 /*-
  * Copyright (c) 2002-2006 David Boggs. <boggs@boggs.palo-alto.ca.us>
@@ -74,7 +74,7 @@
  */
 
 # include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_lmc.c,v 1.61 2016/06/10 13:31:43 ozaki-r Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_lmc.c,v 1.63 2017/01/24 09:05:28 ozaki-r Exp $");
 # include <sys/param.h>	/* OS version */
 # include "opt_inet.h"	/* INET6, INET */
 # include "opt_altq_enabled.h" /* ALTQ */

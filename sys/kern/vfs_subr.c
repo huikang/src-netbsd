@@ -1,4 +1,4 @@
-/*	$NetBSD: vfs_subr.c,v 1.449 2016/05/26 11:07:33 hannken Exp $	*/
+/*	$NetBSD: vfs_subr.c,v 1.459 2017/01/11 14:52:02 hannken Exp $	*/
 
 /*-
  * Copyright (c) 1997, 1998, 2004, 2005, 2007, 2008 The NetBSD Foundation, Inc.
@@ -68,15 +68,13 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: vfs_subr.c,v 1.449 2016/05/26 11:07:33 hannken Exp $");
+__KERNEL_RCSID(0, "$NetBSD: vfs_subr.c,v 1.459 2017/01/11 14:52:02 hannken Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_ddb.h"
 #include "opt_compat_netbsd.h"
 #include "opt_compat_43.h"
 #endif
-
-#define _VFS_VNODE_PRIVATE	/* for vcache_print(). */
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -85,7 +83,7 @@ __KERNEL_RCSID(0, "$NetBSD: vfs_subr.c,v 1.449 2016/05/26 11:07:33 hannken Exp $
 #include <sys/filedesc.h>
 #include <sys/kernel.h>
 #include <sys/mount.h>
-#include <sys/vnode.h>
+#include <sys/vnode_impl.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/namei.h>
@@ -554,7 +552,7 @@ vdevgone(int maj, int minl, int minh, enum vtype type)
 
 #define SYNCER_MAXDELAY		32
 
-typedef TAILQ_HEAD(synclist, vnode) synclist_t;
+typedef TAILQ_HEAD(synclist, vnode_impl) synclist_t;
 
 static void	vn_syncer_add1(struct vnode *, int);
 static void	sysctl_vfs_syncfs_setup(struct sysctllog **);
@@ -626,6 +624,7 @@ static void
 vn_syncer_add1(struct vnode *vp, int delayx)
 {
 	synclist_t *slp;
+	vnode_impl_t *vip = VNODE_TO_VIMPL(vp);
 
 	KASSERT(mutex_owned(&syncer_data_lock));
 
@@ -635,17 +634,17 @@ vn_syncer_add1(struct vnode *vp, int delayx)
 		 * Note: called from sched_sync(), which will not hold
 		 * interlock, therefore we cannot modify v_iflag here.
 		 */
-		slp = &syncer_workitem_pending[vp->v_synclist_slot];
-		TAILQ_REMOVE(slp, vp, v_synclist);
+		slp = &syncer_workitem_pending[vip->vi_synclist_slot];
+		TAILQ_REMOVE(slp, vip, vi_synclist);
 	} else {
 		KASSERT(mutex_owned(vp->v_interlock));
 		vp->v_iflag |= VI_ONWORKLST;
 	}
 
-	vp->v_synclist_slot = sync_delay_slot(delayx);
+	vip->vi_synclist_slot = sync_delay_slot(delayx);
 
-	slp = &syncer_workitem_pending[vp->v_synclist_slot];
-	TAILQ_INSERT_TAIL(slp, vp, v_synclist);
+	slp = &syncer_workitem_pending[vip->vi_synclist_slot];
+	TAILQ_INSERT_TAIL(slp, vip, vi_synclist);
 }
 
 void
@@ -666,14 +665,15 @@ void
 vn_syncer_remove_from_worklist(struct vnode *vp)
 {
 	synclist_t *slp;
+	vnode_impl_t *vip = VNODE_TO_VIMPL(vp);
 
 	KASSERT(mutex_owned(vp->v_interlock));
 
 	mutex_enter(&syncer_data_lock);
 	if (vp->v_iflag & VI_ONWORKLST) {
 		vp->v_iflag &= ~VI_ONWORKLST;
-		slp = &syncer_workitem_pending[vp->v_synclist_slot];
-		TAILQ_REMOVE(slp, vp, v_synclist);
+		slp = &syncer_workitem_pending[vip->vi_synclist_slot];
+		TAILQ_REMOVE(slp, vip, vi_synclist);
 	}
 	mutex_exit(&syncer_data_lock);
 }
@@ -738,7 +738,7 @@ lazy_sync_vnode(struct vnode *vp)
 	/* We are locking in the wrong direction. */
 	if (mutex_tryenter(vp->v_interlock)) {
 		mutex_exit(&syncer_data_lock);
-		if (vget(vp, LK_NOWAIT, false /* !wait */) == 0) {
+		if (vcache_tryvget(vp) == 0) {
 			if (vn_lock(vp, LK_EXCLUSIVE | LK_NOWAIT) == 0) {
 				synced = true;
 				(void) VOP_FSYNC(vp, curlwp->l_cred,
@@ -797,14 +797,14 @@ sched_sync(void *arg)
 		if (syncer_delayno >= syncer_last)
 			syncer_delayno = 0;
 
-		while ((vp = TAILQ_FIRST(slp)) != NULL) {
+		while ((vp = VIMPL_TO_VNODE(TAILQ_FIRST(slp))) != NULL) {
 			synced = lazy_sync_vnode(vp);
 
 			/*
 			 * XXX The vnode may have been recycled, in which
 			 * case it may have a new identity.
 			 */
-			if (TAILQ_FIRST(slp) == vp) {
+			if (VIMPL_TO_VNODE(TAILQ_FIRST(slp)) == vp) {
 				/*
 				 * Put us back on the worklist.  The worklist
 				 * routine will remove us from our current
@@ -1058,13 +1058,78 @@ vattr_null(struct vattr *vap)
 	vap->va_bytes = VNOVAL;
 }
 
+/*
+ * Vnode state to string.
+ */
+const char *
+vstate_name(enum vnode_state state)
+{
+
+	switch (state) {
+	case VS_MARKER:
+		return "MARKER";
+	case VS_LOADING:
+		return "LOADING";
+	case VS_ACTIVE:
+		return "ACTIVE";
+	case VS_BLOCKED:
+		return "BLOCKED";
+	case VS_RECLAIMING:
+		return "RECLAIMING";
+	case VS_RECLAIMED:
+		return "RECLAIMED";
+	default:
+		return "ILLEGAL";
+	}
+}
+
+/*
+ * Print a description of a vnode (common part).
+ */
+static void
+vprint_common(struct vnode *vp, const char *prefix,
+    void (*pr)(const char *, ...) __printflike(1, 2))
+{
+	int n;
+	char bf[96];
+	const uint8_t *cp;
+	vnode_impl_t *vip;
+	const char * const vnode_tags[] = { VNODE_TAGS };
+	const char * const vnode_types[] = { VNODE_TYPES };
+	const char vnode_flagbits[] = VNODE_FLAGBITS;
+
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof(arr[0]))
 #define ARRAY_PRINT(idx, arr) \
     ((unsigned int)(idx) < ARRAY_SIZE(arr) ? (arr)[(idx)] : "UNKNOWN")
 
-const char * const vnode_tags[] = { VNODE_TAGS };
-const char * const vnode_types[] = { VNODE_TYPES };
-const char vnode_flagbits[] = VNODE_FLAGBITS;
+	vip = VNODE_TO_VIMPL(vp);
+
+	snprintb(bf, sizeof(bf),
+	    vnode_flagbits, vp->v_iflag | vp->v_vflag | vp->v_uflag);
+
+	(*pr)("vnode %p flags %s\n", vp, bf);
+	(*pr)("%stag %s(%d) type %s(%d) mount %p typedata %p\n", prefix,
+	    ARRAY_PRINT(vp->v_tag, vnode_tags), vp->v_tag,
+	    ARRAY_PRINT(vp->v_type, vnode_types), vp->v_type,
+	    vp->v_mount, vp->v_mountedhere);
+	(*pr)("%susecount %d writecount %d holdcount %d\n", prefix,
+	    vp->v_usecount, vp->v_writecount, vp->v_holdcnt);
+	(*pr)("%ssize %" PRIx64 " writesize %" PRIx64 " numoutput %d\n",
+	    prefix, vp->v_size, vp->v_writesize, vp->v_numoutput);
+	(*pr)("%sdata %p lock %p\n", prefix, vp->v_data, &vip->vi_lock);
+
+	(*pr)("%sstate %s key(%p %zd)", prefix, vstate_name(vip->vi_state),
+	    vip->vi_key.vk_mount, vip->vi_key.vk_key_len);
+	n = vip->vi_key.vk_key_len;
+	cp = vip->vi_key.vk_key;
+	while (n-- > 0)
+		(*pr)(" %02x", *cp++);
+	(*pr)("\n");
+	(*pr)("%slrulisthd %p\n", prefix, vip->vi_lrulisthd);
+
+#undef ARRAY_PRINT
+#undef ARRAY_SIZE
+}
 
 /*
  * Print out a description of a vnode.
@@ -1072,22 +1137,10 @@ const char vnode_flagbits[] = VNODE_FLAGBITS;
 void
 vprint(const char *label, struct vnode *vp)
 {
-	char bf[96];
-	int flag;
-
-	flag = vp->v_iflag | vp->v_vflag | vp->v_uflag;
-	snprintb(bf, sizeof(bf), vnode_flagbits, flag);
 
 	if (label != NULL)
 		printf("%s: ", label);
-	printf("vnode @ %p, flags (%s)\n\ttag %s(%d), type %s(%d), "
-	    "usecount %d, writecount %d, holdcount %d\n"
-	    "\tfreelisthd %p, mount %p, data %p lock %p\n",
-	    vp, bf, ARRAY_PRINT(vp->v_tag, vnode_tags), vp->v_tag,
-	    ARRAY_PRINT(vp->v_type, vnode_types), vp->v_type,
-	    vp->v_usecount, vp->v_writecount, vp->v_holdcnt,
-	    vp->v_freelisthd, vp->v_mount, vp->v_data, &vp->v_lock);
-	vcache_print(vp, "\t", printf);
+	vprint_common(vp, "\t", printf);
 	if (vp->v_data != NULL) {
 		printf("\t");
 		VOP_PRINT(vp);
@@ -1465,27 +1518,10 @@ vfs_buf_print(struct buf *bp, int full, void (*pr)(const char *, ...))
 void
 vfs_vnode_print(struct vnode *vp, int full, void (*pr)(const char *, ...))
 {
-	char bf[256];
 
 	uvm_object_printit(&vp->v_uobj, full, pr);
-	snprintb(bf, sizeof(bf),
-	    vnode_flagbits, vp->v_iflag | vp->v_vflag | vp->v_uflag);
-	(*pr)("\nVNODE flags %s\n", bf);
-	(*pr)("mp %p numoutput %d size 0x%llx writesize 0x%llx\n",
-	      vp->v_mount, vp->v_numoutput, vp->v_size, vp->v_writesize);
-
-	(*pr)("data %p writecount %ld holdcnt %ld\n",
-	      vp->v_data, vp->v_writecount, vp->v_holdcnt);
-
-	(*pr)("tag %s(%d) type %s(%d) mount %p typedata %p\n",
-	      ARRAY_PRINT(vp->v_tag, vnode_tags), vp->v_tag,
-	      ARRAY_PRINT(vp->v_type, vnode_types), vp->v_type,
-	      vp->v_mount, vp->v_mountedhere);
-
-	(*pr)("v_lock %p\n", &vp->v_lock);
-
-	vcache_print(vp, "", pr);
-
+	(*pr)("\n");
+	vprint_common(vp, "", printf);
 	if (full) {
 		struct buf *bp;
 
@@ -1499,6 +1535,21 @@ vfs_vnode_print(struct vnode *vp, int full, void (*pr)(const char *, ...))
 		LIST_FOREACH(bp, &vp->v_dirtyblkhd, b_vnbufs) {
 			(*pr)(" bp %p\n", bp);
 			vfs_buf_print(bp, full, pr);
+		}
+	}
+}
+
+void
+vfs_vnode_lock_print(void *vlock, int full, void (*pr)(const char *, ...))
+{
+	struct mount *mp;
+	vnode_impl_t *vip;
+
+	TAILQ_FOREACH(mp, &mountlist, mnt_list) {
+		TAILQ_FOREACH(vip, &mp->mnt_vnodelist, vi_mntvnodes) {
+			if (&vip->vi_lock != vlock)
+				continue;
+			vfs_vnode_print(VIMPL_TO_VNODE(vip), full, pr);
 		}
 	}
 }
@@ -1558,9 +1609,11 @@ vfs_mount_print(struct mount *mp, int full, void (*pr)(const char *, ...))
 
 	{
 		int cnt = 0;
-		struct vnode *vp;
+		vnode_t *vp;
+		vnode_impl_t *vip;
 		(*pr)("locked vnodes =");
-		TAILQ_FOREACH(vp, &mp->mnt_vnodelist, v_mntvnodes) {
+		TAILQ_FOREACH(vip, &mp->mnt_vnodelist, vi_mntvnodes) {
+			vp = VIMPL_TO_VNODE(vip);
 			if (VOP_ISLOCKED(vp)) {
 				if ((++cnt % 6) == 0) {
 					(*pr)(" %p,\n\t", vp);
@@ -1574,10 +1627,12 @@ vfs_mount_print(struct mount *mp, int full, void (*pr)(const char *, ...))
 
 	if (full) {
 		int cnt = 0;
-		struct vnode *vp;
+		vnode_t *vp;
+		vnode_impl_t *vip;
 		(*pr)("all vnodes =");
-		TAILQ_FOREACH(vp, &mp->mnt_vnodelist, v_mntvnodes) {
-			if (!TAILQ_NEXT(vp, v_mntvnodes)) {
+		TAILQ_FOREACH(vip, &mp->mnt_vnodelist, vi_mntvnodes) {
+			vp = VIMPL_TO_VNODE(vip);
+			if (!TAILQ_NEXT(vip, vi_mntvnodes)) {
 				(*pr)(" %p", vp);
 			} else if ((++cnt % 6) == 0) {
 				(*pr)(" %p,\n\t", vp);
@@ -1585,7 +1640,7 @@ vfs_mount_print(struct mount *mp, int full, void (*pr)(const char *, ...))
 				(*pr)(" %p,", vp);
 			}
 		}
-		(*pr)("\n", vp);
+		(*pr)("\n");
 	}
 }
 
@@ -1598,7 +1653,8 @@ void
 printlockedvnodes(void)
 {
 	struct mount *mp, *nmp;
-	struct vnode *vp;
+	vnode_t *vp;
+	vnode_impl_t *vip;
 
 	printf("Locked vnodes\n");
 	mutex_enter(&mountlist_lock);
@@ -1606,7 +1662,8 @@ printlockedvnodes(void)
 		if (vfs_busy(mp, &nmp)) {
 			continue;
 		}
-		TAILQ_FOREACH(vp, &mp->mnt_vnodelist, v_mntvnodes) {
+		TAILQ_FOREACH(vip, &mp->mnt_vnodelist, vi_mntvnodes) {
+			vp = VIMPL_TO_VNODE(vip);
 			if (VOP_ISLOCKED(vp))
 				vprint(NULL, vp);
 		}

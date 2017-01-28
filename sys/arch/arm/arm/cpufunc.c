@@ -1,4 +1,4 @@
-/*	$NetBSD: cpufunc.c,v 1.161 2016/05/30 17:18:38 dholland Exp $	*/
+/*	$NetBSD: cpufunc.c,v 1.163 2017/01/28 13:21:11 jakllsch Exp $	*/
 
 /*
  * arm7tdmi support code Copyright (c) 2001 John Fremlin
@@ -49,7 +49,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: cpufunc.c,v 1.161 2016/05/30 17:18:38 dholland Exp $");
+__KERNEL_RCSID(0, "$NetBSD: cpufunc.c,v 1.163 2017/01/28 13:21:11 jakllsch Exp $");
 
 #include "opt_compat_netbsd.h"
 #include "opt_cpuoptions.h"
@@ -2158,13 +2158,13 @@ set_cpufuncs(void)
 	    cputype == CPU_ID_ARM_88SV581X_V6 ||
 	    cputype == CPU_ID_ARM_88SV581X_V7) &&
 	    (armreg_pfr0_read() & ARM_PFR0_THUMBEE_MASK)) {
-			cpufuncs = pj4bv7_cpufuncs;
+		cpufuncs = pj4bv7_cpufuncs;
 #if defined(CPU_ARMV6) || defined(CPU_PRE_ARMV6)
-			cpu_armv7_p = true;
+		cpu_armv7_p = true;
 #endif
-			get_cachetype_cp15();
-			pmap_pte_init_armv7();
-			return 0;
+		get_cachetype_cp15();
+		pmap_pte_init_armv7();
+		return 0;
 	}
 #endif /* CPU_PJ4B */
 
@@ -3076,7 +3076,7 @@ pj4bv7_setup(char *args)
 	cpuctrl |= CPU_CONTROL_IC_ENABLE;
 	cpuctrl |= (0xf << 3);
 	cpuctrl |= CPU_CONTROL_BPRD_ENABLE;
-	cpuctrl |= (0x5 << 16) | (1 < 22);
+	cpuctrl |= (0x5 << 16);
 	cpuctrl |= CPU_CONTROL_XP_ENABLE;
 
 #ifndef ARM_HAS_VBAR

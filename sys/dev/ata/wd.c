@@ -1,4 +1,4 @@
-/*	$NetBSD: wd.c,v 1.425 2016/07/22 12:55:34 jakllsch Exp $ */
+/*	$NetBSD: wd.c,v 1.427 2016/11/20 02:35:19 pgoyette Exp $ */
 
 /*
  * Copyright (c) 1998, 2001 Manuel Bouyer.  All rights reserved.
@@ -54,7 +54,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: wd.c,v 1.425 2016/07/22 12:55:34 jakllsch Exp $");
+__KERNEL_RCSID(0, "$NetBSD: wd.c,v 1.427 2016/11/20 02:35:19 pgoyette Exp $");
 
 #include "opt_ata.h"
 
@@ -394,8 +394,8 @@ wdattach(device_t parent, device_t self, void *aux)
 	if ((wd->sc_params.atap_secsz & ATA_SECSZ_VALID_MASK) == ATA_SECSZ_VALID
 	    && ((wd->sc_params.atap_secsz & ATA_SECSZ_LLS) != 0)) {
 		wd->sc_blksize = 2ULL *
-		    (wd->sc_params.atap_lls_secsz[1] << 16 |
-		     wd->sc_params.atap_lls_secsz[0] <<  0);
+		    ((uint32_t)((wd->sc_params.atap_lls_secsz[1] << 16) |
+		    wd->sc_params.atap_lls_secsz[0]));
 	} else {
 		wd->sc_blksize = 512;
 	}
@@ -482,12 +482,12 @@ wddetach(device_t self, int flags)
 	/* Kill off any queued buffers. */
 	bufq_drain(sc->sc_q);
 
-	bufq_free(sc->sc_q);
 	sc->atabus->ata_killpending(sc->drvp);
 	if (flags & DETACH_POWEROFF)
 		wd_standby(sc, AT_POLL);
 
 	splx(s);
+	bufq_free(sc->sc_q);
 
 	/* Detach disk. */
 	disk_detach(&sc->sc_dk);

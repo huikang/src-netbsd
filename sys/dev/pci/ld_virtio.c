@@ -1,4 +1,4 @@
-/*	$NetBSD: ld_virtio.c,v 1.10 2016/07/07 06:55:41 msaitoh Exp $	*/
+/*	$NetBSD: ld_virtio.c,v 1.13 2016/11/30 01:36:38 christos Exp $	*/
 
 /*
  * Copyright (c) 2010 Minoura Makoto.
@@ -26,16 +26,18 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ld_virtio.c,v 1.10 2016/07/07 06:55:41 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: ld_virtio.c,v 1.13 2016/11/30 01:36:38 christos Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/buf.h>
+#include <sys/bufq.h>
 #include <sys/bus.h>
 #include <sys/device.h>
 #include <sys/disk.h>
 #include <sys/mutex.h>
+#include <sys/module.h>
 
 #include <dev/pci/pcidevs.h>
 #include <dev/pci/pcireg.h>
@@ -44,6 +46,8 @@ __KERNEL_RCSID(0, "$NetBSD: ld_virtio.c,v 1.10 2016/07/07 06:55:41 msaitoh Exp $
 #include <dev/ldvar.h>
 #include <dev/pci/virtioreg.h>
 #include <dev/pci/virtiovar.h>
+
+#include "ioconf.h"
 
 /*
  * ld_virtioreg:
@@ -350,7 +354,7 @@ ld_virtio_attach(device_t parent, device_t self, void *aux)
 	ld->sc_start = ld_virtio_start;
 
 	ld->sc_flags = LDF_ENABLED;
-	ldattach(ld);
+	ldattach(ld, BUFQ_DISK_DEFAULT_STRAT);
 
 	return;
 
@@ -395,7 +399,6 @@ ld_virtio_start(struct ld_softc *ld, struct buf *bp)
 	r = virtio_enqueue_reserve(vsc, vq, slot, vr->vr_payload->dm_nsegs +
 	    VIRTIO_BLK_MIN_SEGMENTS);
 	if (r != 0) {
-		virtio_enqueue_abort(vsc, vq, slot);
 		bus_dmamap_unload(vsc->sc_dmat, vr->vr_payload);
 		return r;
 	}
@@ -602,4 +605,47 @@ ld_virtio_detach(device_t self, int flags)
 	ldenddetach(ld);
 
 	return 0;
+}
+
+MODULE(MODULE_CLASS_DRIVER, ld_virtio, "ld,virtio");
+
+#ifdef _MODULE
+/*
+ * XXX Don't allow ioconf.c to redefine the "struct cfdriver ld_cd"
+ * XXX it will be defined in the common-code module
+ */
+#undef  CFDRIVER_DECL
+#define CFDRIVER_DECL(name, class, attr)
+#include "ioconf.c"
+#endif
+ 
+static int
+ld_virtio_modcmd(modcmd_t cmd, void *opaque)
+{
+#ifdef _MODULE
+	/*
+	 * We ignore the cfdriver_vec[] that ioconf provides, since
+	 * the cfdrivers are attached already.
+	 */
+	static struct cfdriver * const no_cfdriver_vec[] = { NULL };
+#endif
+	int error = 0;
+ 
+#ifdef _MODULE
+	switch (cmd) {
+	case MODULE_CMD_INIT:
+		error = config_init_component(no_cfdriver_vec,
+		    cfattach_ioconf_ld_virtio, cfdata_ioconf_ld_virtio);
+		break;
+	case MODULE_CMD_FINI:
+		error = config_fini_component(no_cfdriver_vec,
+		    cfattach_ioconf_ld_virtio, cfdata_ioconf_ld_virtio);
+		break;
+	default:
+		error = ENOTTY;
+		break;
+	}
+#endif
+
+	return error;
 }

@@ -1,4 +1,4 @@
-/*	$NetBSD: ehci.c,v 1.252 2016/05/14 07:14:31 skrll Exp $ */
+/*	$NetBSD: ehci.c,v 1.254 2016/10/03 00:32:37 dholland Exp $ */
 
 /*
  * Copyright (c) 2004-2012 The NetBSD Foundation, Inc.
@@ -53,7 +53,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ehci.c,v 1.252 2016/05/14 07:14:31 skrll Exp $");
+__KERNEL_RCSID(0, "$NetBSD: ehci.c,v 1.254 2016/10/03 00:32:37 dholland Exp $");
 
 #include "ohci.h"
 #include "uhci.h"
@@ -418,10 +418,10 @@ ehci_init(ehci_softc_t *sc)
 	sc->sc_xferpool = pool_cache_init(sizeof(struct ehci_xfer), 0, 0, 0,
 	    "ehcixfer", NULL, IPL_USB, NULL, NULL, NULL);
 
-	sc->sc_doorbell_si = softint_establish(SOFTINT_NET | SOFTINT_MPSAFE,
+	sc->sc_doorbell_si = softint_establish(SOFTINT_USB | SOFTINT_MPSAFE,
 	    ehci_doorbell, sc);
 	KASSERT(sc->sc_doorbell_si != NULL);
-	sc->sc_pcd_si = softint_establish(SOFTINT_NET | SOFTINT_MPSAFE,
+	sc->sc_pcd_si = softint_establish(SOFTINT_USB | SOFTINT_MPSAFE,
 	    ehci_pcd, sc);
 	KASSERT(sc->sc_pcd_si != NULL);
 
@@ -2168,8 +2168,11 @@ ehci_sync_hc(ehci_softc_t *sc)
 	DPRINTF("cmd = 0x%08x sts = 0x%08x ... done",
 	    EOREAD4(sc, EHCI_USBCMD), EOREAD4(sc, EHCI_USBSTS), 0, 0);
 #ifdef DIAGNOSTIC
-	if (error)
-		printf("ehci_sync_hc: cv_timedwait() = %d\n", error);
+	if (error == EWOULDBLOCK) {
+		printf("ehci_sync_hc: timed out\n");
+	} else if (error) {
+		printf("ehci_sync_hc: cv_timedwait: error %d\n", error);
+	}
 #endif
 }
 

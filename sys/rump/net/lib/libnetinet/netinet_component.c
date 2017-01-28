@@ -1,4 +1,4 @@
-/*	$NetBSD: netinet_component.c,v 1.5 2016/01/26 23:12:19 pooka Exp $	*/
+/*	$NetBSD: netinet_component.c,v 1.8 2017/01/20 08:35:33 ozaki-r Exp $	*/
 
 /*
  * Copyright (c) 2009 Antti Kantee.  All Rights Reserved.
@@ -28,7 +28,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: netinet_component.c,v 1.5 2016/01/26 23:12:19 pooka Exp $");
+__KERNEL_RCSID(0, "$NetBSD: netinet_component.c,v 1.8 2017/01/20 08:35:33 ozaki-r Exp $");
 
 #include <sys/param.h>
 #include <sys/domain.h>
@@ -45,8 +45,6 @@ __KERNEL_RCSID(0, "$NetBSD: netinet_component.c,v 1.5 2016/01/26 23:12:19 pooka 
 #include <rump-sys/kern.h>
 #include <rump-sys/net.h>
 
-int carpattach(int);
-
 RUMP_COMPONENT(RUMP_COMPONENT_NET)
 {
 	extern struct domain arpdomain, inetdomain;
@@ -54,9 +52,15 @@ RUMP_COMPONENT(RUMP_COMPONENT_NET)
 	domain_attach(&arpdomain);
 	domain_attach(&inetdomain);
 
-	carpattach(1);
-
 	rump_netisr_register(NETISR_ARP, arpintr);
+}
+
+int carpattach(int);
+
+RUMP_COMPONENT(RUMP_COMPONENT_NET_IF)
+{
+
+	carpattach(1);
 }
 
 RUMP_COMPONENT(RUMP_COMPONENT_NET_IFCFG)
@@ -65,6 +69,9 @@ RUMP_COMPONENT(RUMP_COMPONENT_NET_IFCFG)
 	struct sockaddr_in *sin;
 	struct socket *so;
 	int error;
+
+	if (lo0ifp == NULL)
+		panic("lo0 config: rumpnet_net has not been initialized");
 
 	if ((error = socreate(AF_INET, &so, SOCK_DGRAM, 0, curlwp, NULL)) != 0)
 		panic("lo0 config: cannot create socket");

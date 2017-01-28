@@ -1,4 +1,4 @@
-/*	$NetBSD: in_var.h,v 1.78 2016/07/08 04:33:30 ozaki-r Exp $	*/
+/*	$NetBSD: in_var.h,v 1.94 2017/01/16 15:44:05 christos Exp $	*/
 
 /*-
  * Copyright (c) 1998 The NetBSD Foundation, Inc.
@@ -71,6 +71,9 @@
 #define IN_IFF_DETACHED		0x04	/* may be detached from the link */
 #define IN_IFF_TRYTENTATIVE	0x08	/* intent to try DAD */
 
+#define IN_IFFBITS \
+    "\020\1TENTATIVE\2DUPLICATED\3DETACHED\4TRYTENTATIVE"
+
 /* do not input/output */
 #define IN_IFF_NOTREADY \
     (IN_IFF_TRYTENTATIVE | IN_IFF_TENTATIVE | IN_IFF_DUPLICATED)
@@ -104,12 +107,32 @@ struct in_ifaddr {
 	int	ia4_flags;		/* address flags */
 	void	(*ia_dad_start) (struct ifaddr *);	/* DAD start function */
 	void	(*ia_dad_stop) (struct ifaddr *);	/* DAD stop function */
+	time_t	ia_dad_defended;	/* last time of DAD defence */
 
 #ifdef _KERNEL
 	struct pslist_entry	ia_hash_pslist_entry;
 	struct pslist_entry	ia_pslist_entry;
 #endif
 };
+
+#ifdef _KERNEL
+static inline void
+ia4_acquire(struct in_ifaddr *ia, struct psref *psref)
+{
+
+	KASSERT(ia != NULL);
+	ifa_acquire(&ia->ia_ifa, psref);
+}
+
+static inline void
+ia4_release(struct in_ifaddr *ia, struct psref *psref)
+{
+
+	if (ia == NULL)
+		return;
+	ifa_release(&ia->ia_ifa, psref);
+}
+#endif
 
 struct	in_aliasreq {
 	char	ifra_name[IFNAMSIZ];		/* if name, e.g. "en0" */
@@ -147,6 +170,7 @@ extern	u_long in_ifaddrhash;			/* size of hash table - 1 */
 extern  struct in_ifaddrhashhead *in_ifaddrhashtbl;	/* Hash table head */
 extern  struct in_ifaddrhead in_ifaddrhead;		/* List head (in ip_input) */
 
+extern pserialize_t in_ifaddrhash_psz;
 extern struct pslist_head *in_ifaddrhashtbl_pslist;
 extern u_long in_ifaddrhash_pslist;
 extern struct pslist_head in_ifaddrhead_pslist;
@@ -238,6 +262,21 @@ in_get_ia(struct in_addr addr)
 	return ia;
 }
 
+static inline struct in_ifaddr *
+in_get_ia_psref(struct in_addr addr, struct psref *psref)
+{
+	struct in_ifaddr *ia;
+	int s;
+
+	s = pserialize_read_enter();
+	ia = in_get_ia(addr);
+	if (ia != NULL)
+		ia4_acquire(ia, psref);
+	pserialize_read_exit(s);
+
+	return ia;
+}
+
 /*
  * Find whether an internet address (in_addr) belongs to a specified
  * interface.  NULL if the address isn't ours.
@@ -252,6 +291,21 @@ in_get_ia_on_iface(struct in_addr addr, struct ifnet *ifp)
 		    ia->ia_ifp == ifp)
 			break;
 	}
+
+	return ia;
+}
+
+static inline struct in_ifaddr *
+in_get_ia_on_iface_psref(struct in_addr addr, struct ifnet *ifp, struct psref *psref)
+{
+	struct in_ifaddr *ia;
+	int s;
+
+	s = pserialize_read_enter();
+	ia = in_get_ia_on_iface(addr, ifp);
+	if (ia != NULL)
+		ia4_acquire(ia, psref);
+	pserialize_read_exit(s);
 
 	return ia;
 }
@@ -271,6 +325,21 @@ in_get_ia_from_ifp(struct ifnet *ifp)
 	}
 
 	return ifatoia(ifa);
+}
+
+static inline struct in_ifaddr *
+in_get_ia_from_ifp_psref(struct ifnet *ifp, struct psref *psref)
+{
+	struct in_ifaddr *ia;
+	int s;
+
+	s = pserialize_read_enter();
+	ia = in_get_ia_from_ifp(ifp);
+	if (ia != NULL)
+		ia4_acquire(ia, psref);
+	pserialize_read_exit(s);
+
+	return ia;
 }
 
 #include <netinet/in_selsrc.h>
@@ -309,6 +378,19 @@ struct in_multi {
 extern pktqueue_t *ip_pktq;
 
 extern int ip_dad_count;		/* Duplicate Address Detection probes */
+#if defined(INET) && NARP > 0
+extern int arp_debug;
+#define ARPLOGADDR(a) in_fmtaddr(_ipbuf, a)
+#define ARPLOG(level, fmt, args...) 					\
+	do {								\
+		char _ipbuf[INET_ADDRSTRLEN];	 			\
+		(void)_ipbuf;						\
+		if (arp_debug) 						\
+			log(level, "%s: " fmt, __func__, ##args);	\
+	} while (/*CONSTCOND*/0)
+#else
+#define ARPLOG(level, fmt, args...)
+#endif
 
 /*
  * Structure used by functions below to remember position when stepping
@@ -332,17 +414,18 @@ int in_multi_lock_held(void);
 
 struct ifaddr;
 
-int	in_ifinit(struct ifnet *,
-	    struct in_ifaddr *, const struct sockaddr_in *, int, int);
+int	in_ifinit(struct ifnet *, struct in_ifaddr *,
+    const struct sockaddr_in *, const struct sockaddr_in *, int);
 void	in_savemkludge(struct in_ifaddr *);
 void	in_restoremkludge(struct in_ifaddr *, struct ifnet *);
 void	in_purgemkludge(struct ifnet *);
-void	in_ifscrub(struct ifnet *, struct in_ifaddr *);
 void	in_setmaxmtu(void);
-const char *in_fmtaddr(struct in_addr);
+const char *in_fmtaddr(char *, struct in_addr);
 int	in_control(struct socket *, u_long, void *, struct ifnet *);
 void	in_purgeaddr(struct ifaddr *);
 void	in_purgeif(struct ifnet *);
+void	in_addrhash_insert(struct in_ifaddr *);
+void	in_addrhash_remove(struct in_ifaddr *);
 int	ipflow_fastforward(struct mbuf *);
 
 struct ipid_state;

@@ -119,7 +119,7 @@
 #if !defined(sun)
 
 #include <sys/ctype.h>
-#include <sys/limits.h>
+#include <sys/syslimits.h>
 //#include <sys/kdb.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
@@ -16659,7 +16659,7 @@ dtrace_state_worker_add(void (*fn)(dtrace_state_t *), dtrace_state_t *state,
 	w = kmem_alloc(sizeof(*w), KM_SLEEP);
 	mutex_init(&w->lock, MUTEX_DEFAULT, IPL_NONE);
 	cv_init(&w->cv, "dtrace");
-	w->interval = ((uintmax_t)hz * interval) / NANOSEC,
+	w->interval = ((uintmax_t)hz * interval) / NANOSEC;
 	w->fn = fn;
 	w->state = state;
 	w->exiting = false;

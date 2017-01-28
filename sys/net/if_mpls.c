@@ -1,4 +1,4 @@
-/*	$NetBSD: if_mpls.c,v 1.26 2016/07/07 06:55:43 msaitoh Exp $ */
+/*	$NetBSD: if_mpls.c,v 1.29 2016/12/12 03:55:57 ozaki-r Exp $ */
 
 /*
  * Copyright (c) 2010 The NetBSD Foundation, Inc.
@@ -30,7 +30,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_mpls.c,v 1.26 2016/07/07 06:55:43 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_mpls.c,v 1.29 2016/12/12 03:55:57 ozaki-r Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_inet.h"
@@ -49,6 +49,9 @@ __KERNEL_RCSID(0, "$NetBSD: if_mpls.c,v 1.26 2016/07/07 06:55:43 msaitoh Exp $")
 #include <net/if_types.h>
 #include <net/netisr.h>
 #include <net/route.h>
+#include <sys/device.h>
+#include <sys/module.h>
+#include <sys/atomic.h>
 
 #ifdef INET
 #include <netinet/in.h>
@@ -108,14 +111,38 @@ static struct mbuf *mpls_label_inet6(struct mbuf *, union mpls_shim *, uint);
 static struct mbuf *mpls_prepend_shim(struct mbuf *, union mpls_shim *);
 
 extern int mpls_defttl, mpls_mapttl_inet, mpls_mapttl_inet6, mpls_icmp_respond,
-	mpls_forwarding, mpls_frame_accept, mpls_mapprec_inet, mpls_mapclass_inet6,
-	mpls_rfc4182;
+    mpls_forwarding, mpls_frame_accept, mpls_mapprec_inet, mpls_mapclass_inet6,
+    mpls_rfc4182;
 
+static u_int mpls_count;
 /* ARGSUSED */
 void
-ifmplsattach(int count)
+mplsattach(int count)
+{
+	/*
+	 * Nothing to do here, initialization is handled by the
+	 * module initialization code in mplsinit() below).
+	 */
+}
+
+static void
+mplsinit(void)
 {
 	if_clone_attach(&mpls_if_cloner);
+}
+
+static int
+mplsdetach(void)
+{
+	int error = 0;
+
+	if (mpls_count != 0)
+		error = EBUSY;
+
+	if (error == 0)
+		if_clone_detach(&mpls_if_cloner);
+
+	return error;
 }
 
 static int
@@ -123,6 +150,7 @@ mpls_clone_create(struct if_clone *ifc, int unit)
 {
 	struct mpls_softc *sc;
 
+	atomic_inc_uint(&mpls_count);
 	sc = malloc(sizeof(*sc), M_DEVBUF, M_WAITOK | M_ZERO);
 
 	if_initname(&sc->sc_if, ifc->ifc_name, unit);
@@ -155,6 +183,7 @@ mpls_clone_destroy(struct ifnet *ifp)
 	splx(s);
 
 	free(ifp->if_softc, M_DEVBUF);
+	atomic_dec_uint(&mpls_count);
 	return 0;
 }
 
@@ -176,13 +205,13 @@ mpls_input(struct ifnet *ifp, struct mbuf *m)
 void
 mplsintr(void)
 {
-	struct mbuf *m;
-	int s;
 
-	while (!IF_IS_EMPTY(&mplsintrq)) {
-		s = splnet();
+	struct mbuf *m;
+
+	for (;;) {
+		IFQ_LOCK(&mplsintrq);
 		IF_DEQUEUE(&mplsintrq, m);
-		splx(s);
+		IFQ_UNLOCK(&mplsintrq);
 
 		if (!m)
 			return;
@@ -275,7 +304,7 @@ mpls_output(struct ifnet *ifp, struct mbuf *m, const struct sockaddr *dst,
 	}
 
 	err = mpls_send_frame(m, rt1->rt_ifp, rt);
-	rtfree(rt1);
+	rt_unref(rt1);
 	return err;
 }
 
@@ -452,7 +481,7 @@ done:
 	if (error != 0 && m != NULL)
 		m_freem(m);
 	if (rt != NULL)
-		rtfree(rt);
+		rt_unref(rt);
 
 	return error;
 }
@@ -659,3 +688,10 @@ mpls_prepend_shim(struct mbuf *m, union mpls_shim *ms)
 
 	return m;
 }
+
+/*
+ * Module infrastructure
+ */
+#include "if_module.h"
+
+IF_MODULE(MODULE_CLASS_DRIVER, mpls, "")

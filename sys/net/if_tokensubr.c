@@ -1,4 +1,4 @@
-/*	$NetBSD: if_tokensubr.c,v 1.76 2016/04/28 00:16:56 ozaki-r Exp $	*/
+/*	$NetBSD: if_tokensubr.c,v 1.80 2017/01/24 18:37:20 maxv Exp $	*/
 
 /*
  * Copyright (c) 1982, 1989, 1993
@@ -92,7 +92,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_tokensubr.c,v 1.76 2016/04/28 00:16:56 ozaki-r Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_tokensubr.c,v 1.80 2017/01/24 18:37:20 maxv Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_inet.h"
@@ -105,8 +105,6 @@ __KERNEL_RCSID(0, "$NetBSD: if_tokensubr.c,v 1.76 2016/04/28 00:16:56 ozaki-r Ex
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
-#include <sys/protosw.h>
-#include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/errno.h>
 #include <sys/syslog.h>
@@ -175,10 +173,16 @@ token_output(struct ifnet *ifp0, struct mbuf *m0, const struct sockaddr *dst,
 		struct ifaddr *ifa;
 
 		/* loop back if this is going to the carp interface */
-		if (dst != NULL && ifp0->if_link_state == LINK_STATE_UP &&
-		    (ifa = ifa_ifwithaddr(dst)) != NULL &&
-		    ifa->ifa_ifp == ifp0)
-			return (looutput(ifp0, m, dst, rt));
+		if (dst != NULL && ifp0->if_link_state == LINK_STATE_UP) {
+			int s = pserialize_read_enter();
+			ifa = ifa_ifwithaddr(dst);
+			if (ifa != NULL &&
+			    ifa->ifa_ifp == ifp0) {
+				pserialize_read_exit(s);
+				return (looutput(ifp0, m, dst, rt));
+			}
+			pserialize_read_exit(s);
+		}
 
 		ifp = ifp->if_carpdev;
 		ah = (struct arphdr *)ifp;
@@ -263,8 +267,10 @@ token_output(struct ifnet *ifp0, struct mbuf *m0, const struct sockaddr *dst,
 		}
 		else {
 			void *tha = ar_tha(ah);
-			if (tha == NULL)
+			if (tha == NULL) {
+				m_freem(m);
 				return 0;
+			}
 			memcpy(edst, tha, sizeof(edst));
 			trh = (struct token_header *)M_TRHSTART(m);
 			trh->token_ac = TOKEN_AC;
@@ -388,7 +394,7 @@ token_input(struct ifnet *ifp, struct mbuf *m)
 	struct ifqueue *inq = NULL;
 	struct llc *l;
 	struct token_header *trh;
-	int s, lan_hdr_len;
+	int lan_hdr_len;
 	int isr = 0;
 
 	if ((ifp->if_flags & IFF_UP) == 0) {
@@ -477,15 +483,16 @@ token_input(struct ifnet *ifp, struct mbuf *m)
 		return;
 	}
 
-	s = splnet();
+	IFQ_LOCK(inq);
 	if (IF_QFULL(inq)) {
 		IF_DROP(inq);
+		IFQ_UNLOCK(inq);
 		m_freem(m);
 	} else {
 		IF_ENQUEUE(inq, m);
+		IFQ_UNLOCK(inq);
 		schednetisr(isr);
 	}
-	splx(s);
 }
 
 /*

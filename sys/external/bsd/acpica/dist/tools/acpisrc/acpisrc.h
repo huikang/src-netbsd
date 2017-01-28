@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2017, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -43,10 +43,7 @@
 
 #include "acpi.h"
 #include "accommon.h"
-
-#include <stdio.h>
-#include <sys/stat.h>
-#include <errno.h>
+#include "acapps.h"
 
 /* mkdir support */
 
