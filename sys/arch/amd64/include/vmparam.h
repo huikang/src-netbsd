@@ -1,4 +1,4 @@
-/*	$NetBSD: vmparam.h,v 1.36 2014/07/24 13:42:28 riastradh Exp $	*/
+/*	$NetBSD: vmparam.h,v 1.38 2016/11/19 09:22:03 maxv Exp $	*/
 
 /*-
  * Copyright (c) 1990 The Regents of the University of California.
@@ -39,7 +39,6 @@
 
 #ifdef __x86_64__
 
-#include <sys/tree.h>
 #include <sys/mutex.h>
 #ifdef _KERNEL_OPT
 #include "opt_xen.h"
@@ -115,7 +114,7 @@
 
 /* user/kernel map constants */
 #define VM_MIN_ADDRESS		0
-#define VM_MAXUSER_ADDRESS	0x00007f8000000000
+#define VM_MAXUSER_ADDRESS	(0x00007f8000000000 - PAGE_SIZE)
 #define VM_MAX_ADDRESS		0x00007fbfdfeff000
 #ifndef XEN
 #define VM_MIN_KERNEL_ADDRESS	0xffff800000000000

@@ -1,4 +1,4 @@
-#	$NetBSD: bsd.own.mk,v 1.938 2016/07/07 07:52:24 martin Exp $
+#	$NetBSD: bsd.own.mk,v 1.1003 2017/01/18 02:33:25 matt Exp $
 
 # This needs to be before bsd.init.mk
 .if defined(BSD_MK_COMPAT_FILE)
@@ -66,22 +66,8 @@ MKGCC?=		no
 #
 .if ${MACHINE_CPU} == "aarch64"
 HAVE_GCC?=	0
-.elif \
-    ${MACHINE} == "alpha" || \
-    ${MACHINE} == "amd64" || \
-    ${MACHINE} == "hppa" || \
-    ${MACHINE} == "i386" || \
-    ${MACHINE} == "ia64" || \
-    ${MACHINE} == "playstation2" || \
-    ${MACHINE} == "sparc" || \
-    ${MACHINE} == "sparc64" || \
-    ${MACHINE_CPU} == "arm" || \
-    ${MACHINE_CPU} == "powerpc" || \
-    ${MACHINE_ARCH} == "vax"
-HAVE_GCC?=	53
 .else
-# Otherwise, default to GCC4.8
-HAVE_GCC?=	48
+HAVE_GCC?=	53
 .endif
 
 #
@@ -96,8 +82,6 @@ MKGCCCMDS?=	no
 #
 .if ${HAVE_GCC} == 53
 EXTERNAL_GCC_SUBDIR=	gcc
-.elif ${HAVE_GCC} == 48
-EXTERNAL_GCC_SUBDIR=	gcc.old
 .else
 EXTERNAL_GCC_SUBDIR=	/does/not/exist
 .endif
@@ -110,6 +94,7 @@ _LIBC_COMPILER_RT.${MACHINE_ARCH}=	yes
 .endif
 
 _LIBC_COMPILER_RT.aarch64=	yes
+_LIBC_COMPILER_RT.aarch64eb=	yes
 _LIBC_COMPILER_RT.i386=		yes
 _LIBC_COMPILER_RT.powerpc=	yes
 _LIBC_COMPILER_RT.powerpc64=	yes
@@ -146,52 +131,22 @@ USE_SSP?=	yes
 #
 # What GDB is used?
 #
-.if ${MACHINE} == "alpha" || \
-    ${MACHINE} == "amd64" || \
-    ${MACHINE} == "i386" || \
-    ${MACHINE} == "ia64" || \
-    ${MACHINE} == "playstation2" || \
-    ${MACHINE} == "sparc" || \
-    ${MACHINE} == "sparc64" || \
-    ${MACHINE} == "vax" || \
-    ${MACHINE_CPU} == "arm" || \
-    ${MACHINE_CPU} == "powerpc" || \
-    ${MACHINE_CPU} == "sh3" || \
-    ${MACHINE_ARCH} == "mips64eb" || ${MACHINE_ARCH} == "mips64el"
-HAVE_GDB?=	710
-.else
-HAVE_GDB?=	79
-.endif
+HAVE_GDB?=	712
 
-.if ${HAVE_GDB} == 79
+.if ${HAVE_GDB} == 712
+EXTERNAL_GDB_SUBDIR=		gdb
+.elif ${HAVE_GDB} == 710
 EXTERNAL_GDB_SUBDIR=		gdb.old
 .else
-EXTERNAL_GDB_SUBDIR=		gdb
+EXTERNAL_GDB_SUBDIR=		/does/not/exist
 .endif
 
 #
 # What binutils is used?
 #
-.if ${MACHINE} == "alpha" || \
-    ${MACHINE} == "amd64" || \
-    ${MACHINE} == "evbarm" || \
-    ${MACHINE} == "hppa" || \
-    ${MACHINE} == "i386" || \
-    ${MACHINE} == "ia64" || \
-    ${MACHINE} == "playstation2" || \
-    ${MACHINE} == "sparc" || \
-    ${MACHINE} == "sparc64" || \
-    ${MACHINE} == "vax" || \
-    ${MACHINE_CPU} == "sh3" || \
-    ${MACHINE_ARCH} == "powerpc"
-HAVE_BINUTILS?=	226
-.else
-HAVE_BINUTILS?=	223
-.endif
+HAVE_BINUTILS?=	227
 
-.if ${HAVE_BINUTILS} == 223
-EXTERNAL_BINUTILS_SUBDIR=	binutils.old
-.elif ${HAVE_BINUTILS} == 226
+.if ${HAVE_BINUTILS} == 227
 EXTERNAL_BINUTILS_SUBDIR=	binutils
 .else
 EXTERNAL_BINUTILS_SUBDIR=	/does/not/exist
@@ -403,6 +358,7 @@ TOOL_FGEN=		${TOOLDIR}/bin/${_TOOL_PREFIX}fgen
 TOOL_GENASSYM=		${TOOLDIR}/bin/${_TOOL_PREFIX}genassym
 TOOL_GENCAT=		${TOOLDIR}/bin/${_TOOL_PREFIX}gencat
 TOOL_GMAKE=		${TOOLDIR}/bin/${_TOOL_PREFIX}gmake
+TOOL_GPT=		${TOOLDIR}/bin/${_TOOL_PREFIX}gpt
 # grep exists in src/tools, but is not hooked up into the build.
 #TOOL_GREP=		${TOOLDIR}/bin/${_TOOL_PREFIX}grep
 TOOL_GREP=		grep
@@ -515,6 +471,7 @@ TOOL_FGEN=		fgen
 TOOL_GENASSYM=		genassym
 TOOL_GENCAT=		gencat
 TOOL_GMAKE=		gmake
+TOOL_GPT=		gpt
 TOOL_GREP=		grep
 TOOL_GROFF=		groff
 TOOL_HEXDUMP=		hexdump
@@ -587,6 +544,8 @@ TOOL_ZIC=		zic
 .if defined(BINDIR) && ${BINDIR} == "/usr/mdec"
 NOPIE=			# defined
 NOCTF=			# defined
+.elif ${MACHINE} == "sun2"
+NOPIE=			# we don't have PIC, so no PIE
 .endif
 
 # Fallback to ensure that all variables are defined to something
@@ -636,7 +595,7 @@ MACHINES.x86_64=	amd64
 # for crunchide & ldd, define the OBJECT_FMTS used by a MACHINE_ARCH
 #
 OBJECT_FMTS=
-.if	${MACHINE_ARCH} != "alpha" 
+.if	${MACHINE_ARCH} != "alpha" && ${MACHINE_ARCH} != "ia64"
 OBJECT_FMTS+=	elf32
 .endif
 .if	${MACHINE_ARCH} == "alpha" || ${MACHINE_ARCH:M*64*} != ""
@@ -691,17 +650,6 @@ check_RELEASEDIR: .PHONY .NOTMAIN
 	@true
 .endif
 .endif
-
-#
-# Build a dynamically linked /bin and /sbin, with the necessary shared
-# libraries moved from /usr/lib to /lib and the shared linker moved
-# from /usr/libexec to /lib
-#
-# Note that if the BINDIR is not /bin or /sbin, then we always use the
-# non-DYNAMICROOT behavior (i.e. it is only enabled for programs in /bin
-# and /sbin).  See <bsd.shlib.mk>.
-#
-MKDYNAMICROOT?=	yes
 
 #
 # Where the system object and source trees are kept; can be configurable
@@ -801,6 +749,7 @@ MKGCC:= no
 
 # No GDB support for aarch64
 MKGDB.aarch64=	no
+MKGDB.aarch64eb=no
 MKGDB.or1k=	no
 MKGDB.riscv32=	no
 MKGDB.riscv64=	no
@@ -843,9 +792,10 @@ MKGDB.ia64=	no
 MKPICLIB:=	no
 .endif
 
-# PowerPC64 and AArch64 ABI's are PIC
-MKPICLIB.powerpc64=	no
-#MKPICLIB.aarch64=	no
+.if !defined(COMMON_MACHINE_ARCH)
+# Native PowerPC64 ABI is PIC.
+MKPICLIB.powerpc64:=	no
+.endif
 
 #
 # On VAX using ELF, all objects are PIC, not just shared libraries,
@@ -970,7 +920,7 @@ dependall:	.NOTMAIN realdepend .MAKE
 #
 .for var in \
 	NOCRYPTO NODOC NOHTML NOINFO NOLINKLIB NOLINT NOMAN NONLS NOOBJ NOPIC \
-	NOPICINSTALL NOPROFILE NOSHARE NOSTATICLIB
+	NOPICINSTALL NOPROFILE NOSHARE NOSTATICLIB NODEBUGLIB
 .if defined(${var})
 MK${var:S/^NO//}:=	no
 .endif
@@ -988,9 +938,11 @@ MK${var}:=	yes
 #
 # MK* options which have variable defaults.
 #
+# aarch64eb is not yet supported.
+#
 .if ${MACHINE_ARCH} == "x86_64" || ${MACHINE_ARCH} == "sparc64" \
     || ${MACHINE_ARCH} == "mips64eb" || ${MACHINE_ARCH} == "mips64el" \
-    || ${MACHINE_ARCH} == "powerpc64" || ${MACHINE_CPU} == "aarch64" \
+    || ${MACHINE_ARCH} == "powerpc64" || ${MACHINE_ARCH} == "aarch64" \
     || ${MACHINE_ARCH} == "riscv64" || !empty(MACHINE_ARCH:Mearm*)
 MKCOMPAT?=	yes
 .else
@@ -1029,20 +981,6 @@ MKSOFTFLOAT?=	yes
 SOFTFLOAT_BITS=	32
 .endif
 
-.if ${MACHINE_ARCH} == "i386" || \
-    ${MACHINE_ARCH} == "x86_64" || \
-    ${MACHINE_ARCH} == "sparc" 
-MKSLJIT?=	yes
-.else
-MKSLJIT?=	no
-.endif
-
-#
-# MK* backward compatibility.
-#
-.if defined(MKBFD)
-MKBINUTILS?=	${MKBFD}
-.endif
 
 #
 # We want to build zfs only for amd64 by default for now.
@@ -1066,7 +1004,10 @@ MKCTF?=		yes
 #
 .if ${MACHINE_ARCH} == "i386" || \
     ${MACHINE_ARCH} == "x86_64" || \
-    ${MACHINE} == "evbarm" || \
+    ${MACHINE_CPU} == "arm" || \
+    ${MACHINE_CPU} == "m68k" || \
+    ${MACHINE_CPU} == "mips" || \
+    ${MACHINE_CPU} == "sh3" || \
     ${MACHINE} == "sparc64"
 MKPIE?=		yes
 .else
@@ -1091,6 +1032,7 @@ _MKVARS.yes= \
 	MKBINUTILS \
 	MKCRYPTO MKCOMPLEX MKCVS MKCXX \
 	MKDOC \
+	MKDYNAMICROOT \
 	MKGCC MKGDB MKGROFF \
 	MKHESIOD MKHTML \
 	MKIEEEFP MKINET6 MKINFO MKIPFILTER MKISCSI \
@@ -1107,6 +1049,7 @@ _MKVARS.yes= \
 	MKPF MKPIC MKPICINSTALL MKPICLIB MKPOSTFIX MKPROFILE \
 	MKRUMP \
 	MKSHARE MKSKEY MKSTATICLIB \
+	MKUNBOUND \
 	MKX11FONTS \
 	MKYP
 .for var in ${_MKVARS.yes}
@@ -1126,24 +1069,62 @@ MKGCCCMDS?=	${MKGCC}
 MKKMOD=		no
 .endif
 
+# Rump doesn't work yet on ia64
+.if ${MACHINE} == "ia64"
+MKRUMP=		no
+.endif
+
+#
+# Build a dynamically linked /bin and /sbin, with the necessary shared
+# libraries moved from /usr/lib to /lib and the shared linker moved
+# from /usr/libexec to /lib
+#
+# Note that if the BINDIR is not /bin or /sbin, then we always use the
+# non-DYNAMICROOT behavior (i.e. it is only enabled for programs in /bin
+# and /sbin).  See <bsd.shlib.mk>.
+#
+# For ia64, ld.elf_so not yet implemented
+.if ${MACHINE_ARCH} == "ia64"
+MKDYNAMICROOT=	no
+.endif
+
+.if defined(MKREPRO)
+MKARZERO ?= ${MKREPRO}
+.endif
+
 #
 # MK* options which default to "no".  Note that MKZFS has a different
-# default for some platforms, see above.
+# default for some platforms, see above.  Please keep alphabetically
+# sorted with at most one letter per line.
 #
 _MKVARS.no= \
+	MKARZERO \
 	MKBSDGREP MKBSDTAR \
-	MKCATPAGES MKCOMPATTESTS MKCOMPATX11 MKCRYPTO_RC5 MKCTF MKDEBUG \
-	MKDEBUGLIB MKDTRACE MKEXTSRC MKGROFFHTMLDOC \
-	MKKYUA MKLLD MKLLDB MKLINT \
-	MKMANZ MKMCLINKER MKOBJDIRS \
-	MKLIBCXX MKLLVM MKPCC \
-	MKPIGZGZIP \
-	MKREPRO \
-	MKSOFTFLOAT MKSTRIPIDENT MKTPM \
-	MKUNPRIVED MKUPDATE MKX11 MKX11MOTIF MKZFS
+	MKCATPAGES MKCOMPATTESTS MKCOMPATX11 MKCRYPTO_RC5 MKCTF \
+	MKDEBUG MKDEBUGLIB MKDTRACE \
+	MKEXTSRC \
+	MKGROFFHTMLDOC \
+	MKKYUA \
+	MKLIBCXX MKLLD MKLLDB MKLLVM MKLINT \
+	MKMANZ MKMCLINKER \
+	MKNSD \
+	MKOBJDIRS \
+	MKPCC MKPIGZGZIP \
+	MKRADEONFIRMWARE MKREPRO \
+	MKSLJIT MKSOFTFLOAT MKSTRIPIDENT \
+	MKTPM \
+	MKUNPRIVED MKUPDATE \
+	MKX11 MKX11MOTIF MKXORG_SERVER \
+	MKZFS
 .for var in ${_MKVARS.no}
 ${var}?=	${${var}.${MACHINE_ARCH}:Uno}
 .endfor
+
+.if ${MACHINE_ARCH} == "i386" || \
+    ${MACHINE_ARCH} == "x86_64" || \
+    ${MACHINE_ARCH} == "sparc" 
+MKSLJIT=	yes
+.endif
 
 #
 # Which platforms build the xorg-server drivers (as opposed
@@ -1177,9 +1158,13 @@ ${var}?=	${${var}.${MACHINE_ARCH}:Uno}
     ${MACHINE} == "sparc64"	|| \
     ${MACHINE} == "vax"		|| \
     ${MACHINE} == "zaurus"
-MKXORG_SERVER?=yes
+MKXORG_SERVER=yes
 .else
-MKXORG_SERVER?=no
+.endif
+
+# Only install the radeon firmware on DRM-happy systems.
+.if ${MACHINE_ARCH} == "x86_64" || ${MACHINE_ARCH} == "i386"
+MKRADEONFIRMWARE=		yes
 .endif
 
 #
@@ -1237,6 +1222,7 @@ MKNLS:=		no
 _NEEDS_LIBCXX.${MACHINE_ARCH}=	yes
 .endif
 _NEEDS_LIBCXX.aarch64=		yes
+_NEEDS_LIBCXX.aarch64eb=	yes
 _NEEDS_LIBCXX.i386=		yes
 _NEEDS_LIBCXX.powerpc=		yes
 _NEEDS_LIBCXX.powerpc64=	yes
@@ -1365,7 +1351,7 @@ X11SRCDIRMIT?=		${X11SRCDIR}/external/mit
 	FS ICE SM X11 XScrnSaver XTrap Xau Xcomposite Xcursor Xdamage \
 	Xdmcp Xevie Xext Xfixes Xfont Xft Xi Xinerama Xmu Xpresent Xpm \
 	Xrandr Xrender Xres Xt Xtst Xv XvMC Xxf86dga Xxf86misc Xxf86vm drm \
-	fontenc xkbfile xkbui Xaw Xfontcache pciaccess xcb \
+	epoxy fontenc xkbfile xkbui Xaw Xfontcache pciaccess xcb xshmfence \
 	pthread-stubs
 X11SRCDIR.${_lib}?=		${X11SRCDIRMIT}/lib${_lib}/dist
 .endfor
@@ -1379,13 +1365,44 @@ X11SRCDIR.${_proto}proto?=		${X11SRCDIRMIT}/${_proto}proto/dist
 .endfor
 
 # During transition from xorg-server 1.10 to 1.18
-.if 0
+.if \
+    ${MACHINE} == "alpha"	|| \
+    ${MACHINE} == "amiga"	|| \
+    ${MACHINE} == "bebox"	|| \
+    ${MACHINE} == "cats"	|| \
+    ${MACHINE} == "dreamcast"	|| \
+    ${MACHINE} == "ews4800mips"	|| \
+    ${MACHINE} == "hp300"	|| \
+    ${MACHINE} == "hpcarm"	|| \
+    ${MACHINE} == "hpcmips"	|| \
+    ${MACHINE} == "hpcsh"	|| \
+    ${MACHINE} == "ibmnws"	|| \
+    ${MACHINE} == "luna68k"	|| \
+    ${MACHINE} == "mac68k"	|| \
+    ${MACHINE} == "netwinder"	|| \
+    ${MACHINE} == "newsmips"	|| \
+    ${MACHINE} == "prep"	|| \
+    ${MACHINE} == "sgimips"	|| \
+    ${MACHINE} == "vax"		|| \
+    ${MACHINE} == "zaurus"
+HAVE_XORG_SERVER_VER?=110
+.else
+HAVE_XORG_SERVER_VER?=118
+.endif
+
+.if ${HAVE_XORG_SERVER_VER} == "118"
 XORG_SERVER_SUBDIR?=xorg-server
+. if ${MACHINE} == "amd64" || ${MACHINE} == "i386"
+HAVE_XORG_GLAMOR?=	yes
+. endif
 .else
 XORG_SERVER_SUBDIR?=xorg-server.old
 .endif
 
 X11SRCDIR.xorg-server?=		${X11SRCDIRMIT}/${XORG_SERVER_SUBDIR}/dist
+HAVE_XORG_GLAMOR?=	no
+
+# Build glamor extension?
 
 .for _dir in \
 	xtrans fontconfig freetype evieext mkfontscale bdftopcf \
@@ -1422,23 +1439,26 @@ X11SRCDIR.${_dir}?=		${X11SRCDIRMIT}/${_dir}/dist
 X11SRCDIR.xf86-input-${_i}?=	${X11SRCDIRMIT}/xf86-input-${_i}/dist
 .endfor
 
+# xf86-video-modesetting move into the server build.
+EXTRA_DRIVERS=
+.if ${HAVE_XORG_SERVER_VER} == "118"
+X11SRCDIR.xf86-video-modesetting=${X11SRCDIR.xorg-server}/hw/xfree86/drivers/modesetting
+.else
+EXTRA_DRIVERS=	modesetting 
+.endif
+
 .for _v in \
-	ag10e apm ark ast ati ati-kms chips cirrus crime \
+	ag10e amdgpu apm ark ast ati ati-kms chips cirrus crime \
 	geode glint i128 i740 igs imstt intel intel-old \
-	modesetting mach64 mga \
-	neomagic newport nouveau nsc nv nvxbox openchrome pnozz \
-	r128 radeonhd rendition \
+	${EXTRA_DRIVERS} mach64 mga \
+	neomagic newport nouveau nsc nv openchrome pnozz \
+	r128 rendition \
 	s3 s3virge savage siliconmotion sis suncg14 \
 	suncg6 sunffb sunleo suntcx \
 	tdfx tga trident tseng vesa vga vmware wsfb xgi
 X11SRCDIR.xf86-video-${_v}?=	${X11SRCDIRMIT}/xf86-video-${_v}/dist
 .endfor
 
-# Only install the radeon firmware on DRM-happy systems.
-.if ${MACHINE_ARCH} == "x86_64" || ${MACHINE_ARCH} == "i386"
-MKRADEONFIRMWARE?=		yes
-.endif
-MKRADEONFIRMWARE?=		no
 
 X11DRI?=			yes
 X11LOADABLE?=			yes

@@ -1,4 +1,4 @@
-/*	$NetBSD: ip_mroute.c,v 1.143 2016/07/04 04:35:09 knakahara Exp $	*/
+/*	$NetBSD: ip_mroute.c,v 1.146 2017/01/24 07:09:24 ozaki-r Exp $	*/
 
 /*
  * Copyright (c) 1992, 1993
@@ -93,7 +93,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ip_mroute.c,v 1.143 2016/07/04 04:35:09 knakahara Exp $");
+__KERNEL_RCSID(0, "$NetBSD: ip_mroute.c,v 1.146 2017/01/24 07:09:24 ozaki-r Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_inet.h"
@@ -111,7 +111,6 @@ __KERNEL_RCSID(0, "$NetBSD: ip_mroute.c,v 1.143 2016/07/04 04:35:09 knakahara Ex
 #include <sys/mbuf.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
-#include <sys/protosw.h>
 #include <sys/errno.h>
 #include <sys/time.h>
 #include <sys/kernel.h>
@@ -785,7 +784,6 @@ static int
 add_vif(struct vifctl *vifcp)
 {
 	struct vif *vifp;
-	struct ifaddr *ifa;
 	struct ifnet *ifp;
 	int error, s;
 	struct sockaddr_in sin;
@@ -811,11 +809,18 @@ add_vif(struct vifctl *vifcp)
 	} else
 #endif
 	{
+		struct ifaddr *ifa;
+
 		sockaddr_in_init(&sin, &vifcp->vifc_lcl_addr, 0);
+		s = pserialize_read_enter();
 		ifa = ifa_ifwithaddr(sintosa(&sin));
-		if (ifa == NULL)
-			return (EADDRNOTAVAIL);
+		if (ifa == NULL) {
+			pserialize_read_exit(s);
+			return EADDRNOTAVAIL;
+		}
 		ifp = ifa->ifa_ifp;
+		/* FIXME NOMPSAFE */
+		pserialize_read_exit(s);
 	}
 
 	if (vifcp->vifc_flags & VIFF_TUNNEL) {
@@ -1556,9 +1561,10 @@ static void
 expire_upcalls(void *v)
 {
 	int i;
-	int s;
 
-	s = splsoftnet();
+	/* XXX NOMPSAFE still need softnet_lock */
+	mutex_enter(softnet_lock);
+	KERNEL_LOCK(1, NULL);
 
 	for (i = 0; i < MFCTBLSIZ; i++) {
 		struct mfc *rt, *nrt;
@@ -1594,9 +1600,11 @@ expire_upcalls(void *v)
 		}
 	}
 
-	splx(s);
 	callout_reset(&expire_upcalls_ch, EXPIRE_TIMEOUT,
 	    expire_upcalls, NULL);
+
+	KERNEL_UNLOCK_ONE(NULL);
+	mutex_exit(softnet_lock);
 }
 
 /*

@@ -1,4 +1,4 @@
-/*	$NetBSD: subr_devsw.c,v 1.34 2016/02/01 05:05:43 riz Exp $	*/
+/*	$NetBSD: subr_devsw.c,v 1.36 2016/12/16 23:35:04 riastradh Exp $	*/
 
 /*-
  * Copyright (c) 2001, 2002, 2007, 2008 The NetBSD Foundation, Inc.
@@ -69,7 +69,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: subr_devsw.c,v 1.34 2016/02/01 05:05:43 riz Exp $");
+__KERNEL_RCSID(0, "$NetBSD: subr_devsw.c,v 1.36 2016/12/16 23:35:04 riastradh Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_dtrace.h"
@@ -796,6 +796,16 @@ bdev_dump(dev_t dev, daddr_t addr, void *data, size_t sz)
 }
 
 int
+bdev_flags(dev_t dev)
+{
+	const struct bdevsw *d;
+
+	if ((d = bdevsw_lookup(dev)) == NULL)
+		return 0;
+	return d->d_flag & ~D_TYPEMASK;
+}
+
+int
 bdev_type(dev_t dev)
 {
 	const struct bdevsw *d;
@@ -1026,6 +1036,16 @@ cdev_discard(dev_t dev, off_t pos, off_t len)
 }
 
 int
+cdev_flags(dev_t dev)
+{
+	const struct cdevsw *d;
+
+	if ((d = cdevsw_lookup(dev)) == NULL)
+		return 0;
+	return d->d_flag & ~D_TYPEMASK;
+}
+
+int
 cdev_type(dev_t dev)
 {
 	const struct cdevsw *d;
@@ -1033,4 +1053,16 @@ cdev_type(dev_t dev)
 	if ((d = cdevsw_lookup(dev)) == NULL)
 		return D_OTHER;
 	return d->d_flag & D_TYPEMASK;
+}
+
+/*
+ * nommap(dev, off, prot)
+ *
+ *	mmap routine that always fails, for non-mmappable devices.
+ */
+paddr_t
+nommap(dev_t dev, off_t off, int prot)
+{
+
+	return (paddr_t)-1;
 }

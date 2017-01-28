@@ -1,4 +1,4 @@
-/*	$NetBSD: gdt.c,v 1.53 2012/02/24 08:06:07 cherry Exp $	*/
+/*	$NetBSD: gdt.c,v 1.56 2016/12/17 14:27:53 maxv Exp $	*/
 
 /*-
  * Copyright (c) 1996, 1997, 2009 The NetBSD Foundation, Inc.
@@ -30,7 +30,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: gdt.c,v 1.53 2012/02/24 08:06:07 cherry Exp $");
+__KERNEL_RCSID(0, "$NetBSD: gdt.c,v 1.56 2016/12/17 14:27:53 maxv Exp $");
 
 #include "opt_multiprocessor.h"
 #include "opt_xen.h"
@@ -61,9 +61,9 @@ static int ldt_count;	/* number of LDTs */
 static int ldt_max = 1000;/* max number of LDTs */
 
 void gdt_init(void);
-void gdt_grow(int);
-int gdt_get_slot1(int);
-void gdt_put_slot1(int, int);
+static void gdt_grow(int);
+static int gdt_get_slot1(int);
+static void gdt_put_slot1(int, int);
 
 void
 update_descriptor(union descriptor *table, union descriptor *entry)
@@ -82,8 +82,8 @@ update_descriptor(union descriptor *table, union descriptor *entry)
 }
 
 void
-setgdt(int sel, const void *base, size_t limit,
-    int type, int dpl, int def32, int gran)
+setgdt(int sel, const void *base, size_t limit, int type, int dpl, int def32,
+    int gran)
 {
 	struct segment_descriptor *sd = &gdt[sel].sd;
 	CPU_INFO_ITERATOR cii;
@@ -144,8 +144,8 @@ gdt_init(void)
 	pmap_update(pmap_kernel());
 	memcpy(gdt, old_gdt, NGDT * sizeof(gdt[0]));
 	ci->ci_gdt = gdt;
-	setsegment(&ci->ci_gdt[GCPU_SEL].sd, ci, 0xfffff,
-	    SDT_MEMRWA, SEL_KPL, 1, 1);
+	setsegment(&ci->ci_gdt[GCPU_SEL].sd, ci,
+	    sizeof(struct cpu_info) - 1, SDT_MEMRWA, SEL_KPL, 1, 0);
 
 	gdt_init_cpu(ci);
 }
@@ -175,8 +175,8 @@ gdt_alloc_cpu(struct cpu_info *ci)
 	pmap_update(pmap_kernel());
 	memset(ci->ci_gdt, 0, min_len);
 	memcpy(ci->ci_gdt, gdt, gdt_count[0] * sizeof(gdt[0]));
-	setsegment(&ci->ci_gdt[GCPU_SEL].sd, ci, 0xfffff,
-	    SDT_MEMRWA, SEL_KPL, 1, 1);
+	setsegment(&ci->ci_gdt[GCPU_SEL].sd, ci,
+	    sizeof(struct cpu_info) - 1, SDT_MEMRWA, SEL_KPL, 1, 0);
 }
 
 
@@ -201,23 +201,21 @@ gdt_init_cpu(struct cpu_info *ci)
 	pt_entry_t *ptp;
 	int f;
 
-	for (va = (vaddr_t)ci->ci_gdt, f = 0;
-	     va < (vaddr_t)ci->ci_gdt + len;
-	     va += PAGE_SIZE, f++) {
+	for (va = (vaddr_t)ci->ci_gdt, f = 0; va < (vaddr_t)ci->ci_gdt + len;
+	    va += PAGE_SIZE, f++) {
 		KASSERT(va >= VM_MIN_KERNEL_ADDRESS);
 		ptp = kvtopte(va);
 		frames[f] = *ptp >> PAGE_SHIFT;
-		{ 
-		   /* 
-		    * pmap_pte_clearbits(ptp, PG_RW);
-		    * but without spl(), since %fs is not setup
-		    * properly yet, ie; curcpu() won't work at this
-		    * point and spl() will break.
-		    */
-			if (HYPERVISOR_update_va_mapping((vaddr_t)va,
-				*ptp & ~PG_RW, UVMF_INVLPG) < 0) {
-				panic("%s page RO update failed.\n", __func__);
-			}
+
+		/* 
+		 * pmap_pte_clearbits(ptp, PG_RW);
+		 * but without spl(), since %fs is not setup
+		 * properly yet, ie; curcpu() won't work at this
+		 * point and spl() will break.
+		 */
+		if (HYPERVISOR_update_va_mapping((vaddr_t)va,
+			*ptp & ~PG_RW, UVMF_INVLPG) < 0) {
+			panic("%s page RO update failed.\n", __func__);
 		}
 	}
 
@@ -274,7 +272,7 @@ gdt_grow(int which)
 					uvm_wait("gdt_grow");
 				}
 				pmap_kenter_pa(va, VM_PAGE_TO_PHYS(pg),
-					       VM_PROT_READ | VM_PROT_WRITE, 0);
+				    VM_PROT_READ | VM_PROT_WRITE, 0);
 			}
 		}
 		return;
@@ -306,7 +304,8 @@ gdt_grow(int which)
  *    the new slots.
  */
 
-int
+#ifndef XEN
+static int
 gdt_get_slot(void)
 {
 
@@ -314,8 +313,9 @@ gdt_get_slot(void)
 
 	return gdt_get_slot1(0);
 }
+#endif
 
-int
+static int
 gdt_get_slot1(int which)
 {
 	int slot;
@@ -345,7 +345,8 @@ gdt_get_slot1(int which)
 /*
  * Deallocate a GDT slot, putting it on the free list.
  */
-void
+#ifndef XEN
+static void
 gdt_put_slot(int slot)
 {
 
@@ -353,8 +354,9 @@ gdt_put_slot(int slot)
 
 	gdt_put_slot1(slot, 0);
 }
+#endif
 
-void
+static void
 gdt_put_slot1(int slot, int which)
 {
 	union descriptor d;

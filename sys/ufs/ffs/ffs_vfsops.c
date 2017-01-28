@@ -1,4 +1,4 @@
-/*	$NetBSD: ffs_vfsops.c,v 1.340 2016/07/28 08:24:58 martin Exp $	*/
+/*	$NetBSD: ffs_vfsops.c,v 1.342 2016/12/27 10:54:38 hannken Exp $	*/
 
 /*-
  * Copyright (c) 2008, 2009 The NetBSD Foundation, Inc.
@@ -61,7 +61,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ffs_vfsops.c,v 1.340 2016/07/28 08:24:58 martin Exp $");
+__KERNEL_RCSID(0, "$NetBSD: ffs_vfsops.c,v 1.342 2016/12/27 10:54:38 hannken Exp $");
 
 #if defined(_KERNEL_OPT)
 #include "opt_ffs.h"
@@ -1917,7 +1917,8 @@ ffs_sync(struct mount *mp, int waitfor, kauth_cred_t cred)
 	ctx.is_suspending = is_suspending;
 	while ((vp = vfs_vnode_iterator_next(marker, ffs_sync_selector, &ctx)))
 	{
-		error = vn_lock(vp, LK_EXCLUSIVE);
+		error = vn_lock(vp,
+		    LK_EXCLUSIVE | (waitfor == MNT_LAZY ? LK_NOWAIT : 0));
 		if (error) {
 			vrele(vp);
 			continue;
@@ -2350,6 +2351,8 @@ ffs_cgupdate(struct ufsmount *mp, int waitfor)
 	int blks;
 	void *space;
 	int i, size, error = 0, allerror = 0;
+
+	UFS_WAPBL_JLOCK_ASSERT(mp);
 
 	allerror = ffs_sbupdate(mp, waitfor);
 	blks = howmany(fs->fs_cssize, fs->fs_fsize);

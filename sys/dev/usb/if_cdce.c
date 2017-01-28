@@ -1,4 +1,4 @@
-/*	$NetBSD: if_cdce.c,v 1.42 2016/06/10 13:27:15 ozaki-r Exp $ */
+/*	$NetBSD: if_cdce.c,v 1.44 2017/01/12 18:26:08 maya Exp $ */
 
 /*
  * Copyright (c) 1997, 1998, 1999, 2000-2003 Bill Paul <wpaul@windriver.com>
@@ -41,7 +41,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_cdce.c,v 1.42 2016/06/10 13:27:15 ozaki-r Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_cdce.c,v 1.44 2017/01/12 18:26:08 maya Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_inet.h"
@@ -281,7 +281,7 @@ cdce_attach(device_t parent, device_t self, void *aux)
 	ifp->if_ioctl = cdce_ioctl;
 	ifp->if_start = cdce_start;
 	ifp->if_watchdog = cdce_watchdog;
-	strncpy(ifp->if_xname, device_xname(sc->cdce_dev), IFNAMSIZ);
+	strlcpy(ifp->if_xname, device_xname(sc->cdce_dev), IFNAMSIZ);
 
 	IFQ_SET_READY(&ifp->if_snd);
 
@@ -712,7 +712,6 @@ cdce_rxeof(struct usbd_xfer *xfer, void *priv, usbd_status status)
 		goto done;
 	}
 
-	ifp->if_ipackets++;
 	m->m_pkthdr.len = m->m_len = total_len;
 	m_set_rcvif(m, ifp);
 
@@ -722,8 +721,6 @@ cdce_rxeof(struct usbd_xfer *xfer, void *priv, usbd_status status)
 		ifp->if_ierrors++;
 		goto done1;
 	}
-
-	bpf_mtap(ifp, m);
 
 	if_percpuq_enqueue((ifp)->if_percpuq, (m));
 

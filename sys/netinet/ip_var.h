@@ -1,4 +1,4 @@
-/*	$NetBSD: ip_var.h,v 1.114 2016/06/21 03:28:27 ozaki-r Exp $	*/
+/*	$NetBSD: ip_var.h,v 1.116 2016/12/08 05:16:33 ozaki-r Exp $	*/
 
 /*
  * Copyright (c) 1982, 1986, 1993
@@ -52,8 +52,9 @@ struct ipovly {
  * IP Flow structure
  */
 struct ipflow {
-	LIST_ENTRY(ipflow) ipf_list;	/* next in active list */
-	LIST_ENTRY(ipflow) ipf_hash;	/* next ipflow in bucket */
+	TAILQ_ENTRY(ipflow) ipf_list;	/* next in active list */
+	TAILQ_ENTRY(ipflow) ipf_hash;	/* next ipflow in bucket */
+	size_t ipf_hashidx;		/* own hash index of ipflowtable[] */
 	struct in_addr ipf_dst;		/* destination address */
 	struct in_addr ipf_src;		/* source address */
 	uint8_t ipf_tos;		/* type-of-service */
@@ -244,7 +245,7 @@ int	ip_if_output(struct ifnet * const, struct mbuf * const,
 /* IP Flow interface. */
 void	ipflow_init(void);
 void	ipflow_poolinit(void);
-void	ipflow_create(const struct route *, struct mbuf *);
+void	ipflow_create(struct route *, struct mbuf *);
 void	ipflow_slowtimo(void);
 int	ipflow_invalidate_all(int);
 

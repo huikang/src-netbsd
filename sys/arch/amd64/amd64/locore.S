@@ -1,4 +1,4 @@
-/*	$NetBSD: locore.S,v 1.108 2016/07/25 16:03:38 maxv Exp $	*/
+/*	$NetBSD: locore.S,v 1.118 2016/12/17 13:49:05 maxv Exp $	*/
 
 /*
  * Copyright-o-rama!
@@ -313,21 +313,6 @@
  */
 	.data
 
-#if NLAPIC > 0
-	.align	PAGE_SIZE
-	.globl	_C_LABEL(local_apic)
-	.globl	_C_LABEL(lapic_tpr)
-
-	.type	_C_LABEL(local_apic), @object
-LABEL(local_apic)
-	.space	LAPIC_TPRI
-END(local_apic)
-	.type	_C_LABEL(lapic_tpr), @object
-LABEL(lapic_tpr)
-	.space	PAGE_SIZE-LAPIC_TPRI
-END(lapic_tpr)
-#endif /* NLAPIC > 0 */
-
 	.globl	_C_LABEL(tablesize)
 	.globl	_C_LABEL(nox_flag)
 	.globl	_C_LABEL(cputype)
@@ -607,12 +592,14 @@ no_NOX:
  *
  * (PROC0 STK + L4 + L3 + L2 + L1) is later referred to as BOOTSTRAP TABLES.
  *
+ * ISA I/O MEM has no physical page allocated here, just virtual addresses.
+ *
  * Important note: the kernel segments are properly 4k-aligned
  * (see kern.ldscript), so there's no need to enforce alignment.
  */
 
 	/* Find end of kernel image; brings us on (1). */
-	movl	$RELOC(end),%edi
+	movl	$RELOC(__kernel_end),%edi
 
 #if (NKSYMS || defined(DDB) || defined(MODULAR)) && !defined(makeoptions_COPY_SYMTAB)
 	/* Save the symbols (if loaded); brinds us on (2). */
@@ -879,8 +866,8 @@ longmode_hi:
 	movw	%ax,%gs
 	movw	%ax,%fs
 
-	/* XXX merge these */
-	leaq	(TABLESIZE+IOM_SIZE)(%rsi),%rdi
+	/* The first physical page available. */
+	leaq	(TABLESIZE)(%rsi),%rdi
 
 #else	/* XEN */
 	/* First, reset the PSL. */
@@ -892,10 +879,9 @@ longmode_hi:
 	/*
 	 * Xen info:
 	 * - %rsi -> start_info struct
-	 * - %rsp -> stack, *theoretically* the last used page
-	 *	by Xen bootstrap
+	 * - %rsp -> stack, *theoretically* the last used page by Xen bootstrap
 	 */
-	movq	%rsi, %rbx
+	movq	%rsi,%rbx
 
 	/* Clear BSS. */
 	xorq	%rax,%rax
@@ -905,7 +891,7 @@ longmode_hi:
 	rep
 	stosb
 
-	/* Copy start_info to a safe place */
+	/* Copy start_info to a safe place. */
 	movq	%rbx,%rsi
 	movq	$_C_LABEL(start_info_union),%rdi
 	movq	$64,%rcx
@@ -929,47 +915,42 @@ longmode_hi:
 	 */
 
 	/*
-	 * We want our own page tables, let's rebuild them
-	 * We will reclaim xen space afterward INCLUDING stack
-	 * so let's change it to a temporary one
+	 * We want our own page tables, and will rebuild them. We will reclaim
+	 * the Xen space later, INCLUDING the stack. So we need to switch to a
+	 * temporary one now.
 	 */
-
-	movq	$tmpstk, %rax
-	subq	$8, %rax
-	movq	%rax, %rsp
+	movq	$tmpstk,%rax
+	subq	$8,%rax
+	movq	%rax,%rsp
 
 	xorl	%eax,%eax
 	cpuid
 	movl	%eax,_C_LABEL(cpuid_level)
 
-	movq	$cpu_info_primary, %rdi
-	movq	%rdi, CPU_INFO_SELF(%rdi) /* ci->ci_self = ci */
-	movq	$1, %rsi
+	movq	$cpu_info_primary,%rdi
+	movq	%rdi,CPU_INFO_SELF(%rdi) /* ci->ci_self = ci */
+	movq	$1,%rsi
 	call	cpu_init_msrs	/* cpu_init_msrs(ci, true); */
 
-	call	xen_pmap_bootstrap
+	call	xen_locore
 
 	/*
-	 * First avail returned by xen_pmap_bootstrap in %rax
+	 * The first VA available is returned by xen_locore in %rax. We
+	 * use it as the UAREA, and set up the stack here.
 	 */
-	movq	%rax, %rsi
+	movq	%rax,%rsi
 	movq	%rsi,(_C_LABEL(lwp0)+L_PCB)	/* XXX L_PCB != uarea */
-
-	/*
-	 * Set new stack and clear segments
-	 */
 	leaq	(USPACE-FRAMESIZE)(%rsi),%rsp
 	xorq	%rbp,%rbp
 
+	/* Clear segment registers. */
 	xorw	%ax,%ax
 	movw	%ax,%gs
 	movw	%ax,%fs
 
-	/*
-	 * Set first_avail after proc0
-	 */
+	/* Set first_avail after the DUMMY PAGE (see xen_locore). */
 	movq	%rsi,%rdi
-	addq	$USPACE,%rdi
+	addq	$(USPACE+PAGE_SIZE),%rdi
 	subq	$KERNBASE,%rdi	/* init_x86_64 wants a physical address */
 #endif	/* XEN */
 
@@ -1160,9 +1141,9 @@ skip_CR0:
 
 	/* The 32bit LWPs are handled differently. */
 	testl	$PCB_COMPAT32,PCB_FLAGS(%r14)
-	jne	lwp_64bit
+	jnz	lwp_32bit
 
-lwp_32bit:
+lwp_64bit:
 	/* Zero out %fs/%gs registers. */
 	xorq	%rax,%rax
 	movw	%ax,%fs
@@ -1189,7 +1170,7 @@ lwp_32bit:
 
 	jmp	switch_return
 
-lwp_64bit:
+lwp_32bit:
 	/* Reload %fs/%gs GDT descriptors. */
 	movq	CPUVAR(GDT),%rcx
 	movq	PCB_FS(%r14),%rax
@@ -1247,7 +1228,7 @@ IDTVEC_END(syscall32)
 IDTVEC(syscall)
 #ifndef XEN
 	/*
-	 * The user %rip is in %rcx and the user %flags in %r11. The kernel %cs
+	 * The user %rip is in %rcx and the user %rflags in %r11. The kernel %cs
 	 * and %ss are loaded, but nothing else is.
 	 *
 	 * The 'swapgs' instruction gives us access to cpu-specific memory where
@@ -1266,12 +1247,11 @@ IDTVEC(syscall)
 
 	/* Make stack look like an 'int nn' frame */
 #define SP(x)	(x)-(TF_SS+8)(%r15)
-	movq	$(LSEL(LUDATA_SEL, SEL_UPL)),SP(TF_SS) /* user %ss */
-	movq	%rsp,SP(TF_RSP)		/* User space rsp */
-
-	movq	%r11,SP(TF_RFLAGS)	/* old rflags from syscall insn */
-	movq	$(LSEL(LUCODE_SEL, SEL_UPL)),SP(TF_CS)
-	movq	%rcx,SP(TF_RIP)		/* syscall saves rip in rcx */
+	movq	$(LSEL(LUDATA_SEL, SEL_UPL)),SP(TF_SS)	/* user %ss */
+	movq	%rsp,SP(TF_RSP)				/* user %rsp */
+	movq	%r11,SP(TF_RFLAGS)			/* user %rflags */
+	movq	$(LSEL(LUCODE_SEL, SEL_UPL)),SP(TF_CS)	/* user %cs */
+	movq	%rcx,SP(TF_RIP)				/* user %rip */
 
 	leaq	SP(0),%rsp		/* %rsp now valid after frame */
 	movq	CPUVAR(SCRATCH),%r15

@@ -1,4 +1,4 @@
-/*	$NetBSD: if.h,v 1.222 2016/07/22 07:09:40 knakahara Exp $	*/
+/*	$NetBSD: if.h,v 1.233 2016/12/22 03:46:51 ozaki-r Exp $	*/
 
 /*-
  * Copyright (c) 1999, 2000, 2001 The NetBSD Foundation, Inc.
@@ -230,6 +230,7 @@ struct bridge_iflist;
 struct callout;
 struct krwlock;
 struct if_percpuq;
+struct if_deferred_start;
 
 typedef unsigned short if_index_t;
 
@@ -243,7 +244,7 @@ typedef struct ifnet {
 	struct bpf_if *if_bpf;		/* packet filter structure */
 	if_index_t	if_index;	/* numeric abbreviation for this if */
 	short	if_timer;		/* time 'til if_slowtimo called */
-	short	if_flags;		/* up/down, broadcast, etc. */
+	unsigned short	if_flags;	/* up/down, broadcast, etc. */
 	short	if_extflags;		/* if_output MP-safe, etc. */
 	struct	if_data if_data;	/* statistics and other data about if */
 	/*
@@ -342,6 +343,7 @@ typedef struct ifnet {
 	struct pslist_entry	if_pslist_entry;
 	struct psref_target     if_psref;
 	struct pslist_head	if_addr_pslist;
+	struct if_deferred_start	*if_deferred_start;
 #endif
 } ifnet_t;
  
@@ -508,8 +510,6 @@ if_is_link_state_changeable(struct ifnet *ifp)
 	KASSERT(rw_read_held((ifp)->if_afdata_lock))
 #define	IF_AFDATA_WLOCK_ASSERT(ifp)	\
 	KASSERT(rw_write_held((ifp)->if_afdata_lock))
-#define	IF_AFDATA_UNLOCK_ASSERT(ifp)	\
-	KASSERT(!rw_lock_held((ifp)->if_afdata_lock))
 
 /*
  * Output queues (ifp->if_snd) and internetwork datagram level (pup level 1)
@@ -596,9 +596,13 @@ struct ifaddr {
 			               const struct sockaddr *);
 	uint32_t	*ifa_seqno;
 	int16_t	ifa_preference;	/* preference level for this address */
-	/* XXX adding variables here breaks kvm(3) users of struct *_ifaddr */
+#ifdef _KERNEL
+	struct pslist_entry     ifa_pslist_entry;
+	struct psref_target	ifa_psref;
+#endif
 };
 #define	IFA_ROUTE	RTF_UP	/* (0x01) route installed */
+#define	IFA_DESTROYING	0x2
 
 /*
  * Message format for use in obtaining information about interfaces from
@@ -631,10 +635,12 @@ struct ifa_msghdr {
 				/* to skip over non-understood messages */
 	u_char	ifam_version;	/* future binary compatibility */
 	u_char	ifam_type;	/* message type */
-	int	ifam_addrs;	/* like rtm_addrs */
-	int	ifam_flags;	/* value of ifa_flags */
-	int	ifam_metric;	/* value of ifa_metric */
 	u_short	ifam_index;	/* index for associated ifp */
+	int	ifam_flags;	/* value of ifa_flags */
+	int	ifam_addrs;	/* like rtm_addrs */
+	pid_t	ifam_pid;	/* identify sender */
+	int	ifam_addrflags;	/* family specific address flags */
+	int	ifam_metric;	/* value of ifa_metric */
 };
 
 /*
@@ -912,6 +918,11 @@ do {									\
 
 #endif /* ALTQ */
 
+#define IFQ_LOCK_INIT(ifq)	(ifq)->ifq_lock =			\
+	    mutex_obj_alloc(MUTEX_DEFAULT, IPL_NET)
+#define IFQ_LOCK(ifq)		mutex_enter((ifq)->ifq_lock)
+#define IFQ_UNLOCK(ifq)		mutex_exit((ifq)->ifq_lock)
+
 #define	IFQ_IS_EMPTY(ifq)		IF_IS_EMPTY((ifq))
 #define	IFQ_INC_LEN(ifq)		((ifq)->ifq_len++)
 #define	IFQ_DEC_LEN(ifq)		(--(ifq)->ifq_len)
@@ -937,7 +948,7 @@ void	if_register(struct ifnet *);
 void	if_attach(struct ifnet *); /* Deprecated. Use if_initialize and if_register */
 void	if_attachdomain(void);
 void	if_deactivate(struct ifnet *);
-bool	if_is_deactivated(struct ifnet *);
+bool	if_is_deactivated(const struct ifnet *);
 void	if_purgeaddrs(struct ifnet *, int, void (*)(struct ifaddr *));
 void	if_detach(struct ifnet *);
 void	if_down(struct ifnet *);
@@ -979,20 +990,36 @@ void	if_percpuq_destroy(struct if_percpuq *);
 void
 	if_percpuq_enqueue(struct if_percpuq *, struct mbuf *);
 
+void	if_deferred_start_init(struct ifnet *, void (*)(struct ifnet *));
+void	if_schedule_deferred_start(struct ifnet *);
+
 void ifa_insert(struct ifnet *, struct ifaddr *);
 void ifa_remove(struct ifnet *, struct ifaddr *);
+
+void	ifa_psref_init(struct ifaddr *);
+void	ifa_acquire(struct ifaddr *, struct psref *);
+void	ifa_release(struct ifaddr *, struct psref *);
+bool	ifa_held(struct ifaddr *);
+bool	ifa_is_destroying(struct ifaddr *);
 
 void	ifaref(struct ifaddr *);
 void	ifafree(struct ifaddr *);
 
 struct	ifaddr *ifa_ifwithaddr(const struct sockaddr *);
+struct	ifaddr *ifa_ifwithaddr_psref(const struct sockaddr *, struct psref *);
 struct	ifaddr *ifa_ifwithaf(int);
 struct	ifaddr *ifa_ifwithdstaddr(const struct sockaddr *);
+struct	ifaddr *ifa_ifwithdstaddr_psref(const struct sockaddr *,
+	    struct psref *);
 struct	ifaddr *ifa_ifwithnet(const struct sockaddr *);
+struct	ifaddr *ifa_ifwithnet_psref(const struct sockaddr *, struct psref *);
 struct	ifaddr *ifa_ifwithladdr(const struct sockaddr *);
-struct	ifaddr *ifa_ifwithroute(int, const struct sockaddr *,
-					const struct sockaddr *);
+struct	ifaddr *ifa_ifwithladdr_psref(const struct sockaddr *, struct psref *);
+struct	ifaddr *ifa_ifwithroute_psref(int, const struct sockaddr *,
+	    const struct sockaddr *, struct psref *);
 struct	ifaddr *ifaof_ifpforaddr(const struct sockaddr *, struct ifnet *);
+struct	ifaddr *ifaof_ifpforaddr_psref(const struct sockaddr *, struct ifnet *,
+	    struct psref *);
 void	link_rtrequest(int, struct rtentry *, const struct rt_addrinfo *);
 void	p2p_rtrequest(int, struct rtentry *, const struct rt_addrinfo *);
 
@@ -1006,9 +1033,9 @@ int	ifq_enqueue2(struct ifnet *, struct ifqueue *, struct mbuf *);
 
 int	loioctl(struct ifnet *, u_long, void *);
 void	loopattach(int);
+void	loopinit(void);
 int	looutput(struct ifnet *,
 	   struct mbuf *, const struct sockaddr *, const struct rtentry *);
-void	lortrequest(int, struct rtentry *, const struct rt_addrinfo *);
 
 /*
  * These are exported because they're an easy way to tell if
@@ -1051,7 +1078,6 @@ __END_DECLS
 					    &(__ifp)->if_addrlist, ifa_list, __nifa)
 #define	IFADDR_EMPTY(__ifp)		TAILQ_EMPTY(&(__ifp)->if_addrlist)
 
-#ifdef notyet
 #define IFADDR_ENTRY_INIT(__ifa)					\
 	PSLIST_ENTRY_INIT((__ifa), ifa_pslist_entry)
 #define IFADDR_ENTRY_DESTROY(__ifa)					\
@@ -1097,34 +1123,6 @@ __END_DECLS
 			}						\
 		}							\
 	} while (0)
-#else
-#define IFADDR_ENTRY_INIT(__ifa)					\
-	do {} while (0)
-#define IFADDR_ENTRY_DESTROY(__ifa)					\
-	do {} while (0)
-#define IFADDR_READER_EMPTY(__ifp)					\
-	IFADDR_EMPTY(__ifp)
-#define IFADDR_READER_FIRST(__ifp)					\
-	IFADDR_FIRST(__ifp)
-#define IFADDR_READER_NEXT(__ifa)					\
-	IFADDR_NEXT(__ifa)
-#define IFADDR_READER_FOREACH(__ifa, __ifp)				\
-	IFADDR_FOREACH(__ifa, __ifp)
-#define IFADDR_WRITER_INSERT_HEAD(__ifp, __ifa)				\
-	do {} while (0)
-#define IFADDR_WRITER_REMOVE(__ifa)					\
-	do {} while (0)
-#define IFADDR_WRITER_FOREACH(__ifa, __ifp)				\
-	IFADDR_FOREACH(__ifa, __ifp)
-#define IFADDR_WRITER_NEXT(__ifp)					\
-	IFADDR_NEXT(__ifa)
-#define IFADDR_WRITER_INSERT_AFTER(__ifp, __new)			\
-	do {} while (0)
-#define IFADDR_WRITER_EMPTY(__ifp)					\
-	IFADDR_EMPTY(__ifp)
-#define IFADDR_WRITER_INSERT_TAIL(__ifp, __new)				\
-	do {} while (0)
-#endif /* notyet */
 
 #define	IFNET_LOCK()			mutex_enter(&ifnet_mtx)
 #define	IFNET_UNLOCK()			mutex_exit(&ifnet_mtx)

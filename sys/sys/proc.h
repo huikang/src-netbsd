@@ -1,4 +1,4 @@
-/*	$NetBSD: proc.h,v 1.331 2016/06/10 23:24:33 christos Exp $	*/
+/*	$NetBSD: proc.h,v 1.337 2017/01/14 06:36:52 kamil Exp $	*/
 
 /*-
  * Copyright (c) 2006, 2007, 2008 The NetBSD Foundation, Inc.
@@ -81,6 +81,7 @@
 #include <machine/proc.h>		/* Machine-dependent proc substruct */
 #include <machine/pcb.h>
 #include <sys/aio.h>
+#include <sys/idtype.h>
 #include <sys/rwlock.h>
 #include <sys/mqueue.h>
 #include <sys/mutex.h>
@@ -192,6 +193,10 @@ struct emul {
 	void 		(*e_dtrace_syscall)(uint32_t, register_t,
 			    const struct sysent *, const void *,
 			    const register_t *, int);
+
+	/* Emulation specific support for ktracing signal posts */
+	void		(*e_ktrpsig)(int, sig_t, const sigset_t *,
+			    const struct ksiginfo *);
 };
 
 /*
@@ -305,6 +310,10 @@ struct proc {
 	struct lcproc	*p_lwpctl;	/* p, a: _lwp_ctl() information */
 	pid_t		p_ppid;		/* :: cached parent pid */
 	pid_t 		p_fpid;		/* :: forked pid */
+	pid_t 		p_vfpid;	/* :: vforked pid */
+	pid_t 		p_vfpid_done;	/* :: vforked done pid */
+	lwpid_t		p_lwp_created;	/* :: lwp created */
+	lwpid_t		p_lwp_exited;	/* :: lwp exited */
 	u_int		p_nsems;	/* Count of semaphores */
 
 /*
@@ -393,6 +402,14 @@ struct proc {
  * and p_lock.  Access from process context only.
  */
 #define	PSL_TRACEFORK	0x00000001 /* traced process wants fork events */
+#define	PSL_TRACEVFORK	0x00000002 /* traced process wants vfork events */
+#define	PSL_TRACEVFORK_DONE	\
+			0x00000004 /* traced process wants vfork done events */
+#define	PSL_TRACELWP_CREATE	\
+			0x00000008 /* traced process wants LWP create events */
+#define	PSL_TRACELWP_EXIT	\
+			0x00000010 /* traced process wants LWP exit events */
+
 #define	PSL_TRACED	0x00000800 /* Debugged process being traced */
 #define	PSL_FSTRACE	0x00010000 /* Debugger process being traced by procfs */
 #define	PSL_CHTRACED	0x00400000 /* Child has been traced & reparented */
@@ -496,6 +513,9 @@ int	kpause(const char *, bool, int, kmutex_t *);
 void	exit1(struct lwp *, int, int) __dead;
 int	kill1(struct lwp *l, pid_t pid, ksiginfo_t *ksi, register_t *retval);
 int	do_sys_wait(int *, int *, int, struct rusage *);
+int	do_sys_waitid(idtype_t, id_t, int *, int *, int, struct wrusage *,
+	    siginfo_t *);
+
 struct proc *proc_alloc(void);
 void	proc0_init(void);
 pid_t	proc_alloc_pid(struct proc *);
@@ -547,6 +567,12 @@ _proclist_skipmarker(struct proc *p0)
 
 	return p;
 }
+
+#define PROC_PTRSZ(p) (((p)->p_flag & PK_32) ? sizeof(int) : sizeof(void *))
+#define PROC_REGSZ(p) (((p)->p_flag & PK_32) ? \
+    sizeof(process_reg32) : sizeof(struct reg))
+#define PROC_FPREGSZ(p) (((p)->p_flag & PK_32) ? \
+    sizeof(process_fpreg32) : sizeof(struct fpreg))
 
 /*
  * PROCLIST_FOREACH: iterate on the given proclist, skipping PK_MARKER ones.

@@ -1,4 +1,4 @@
-/*	$NetBSD: if_arp.c,v 1.220 2016/07/28 09:03:50 ozaki-r Exp $	*/
+/*	$NetBSD: if_arp.c,v 1.240 2017/01/24 07:09:24 ozaki-r Exp $	*/
 
 /*-
  * Copyright (c) 1998, 2000, 2008 The NetBSD Foundation, Inc.
@@ -68,15 +68,17 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_arp.c,v 1.220 2016/07/28 09:03:50 ozaki-r Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_arp.c,v 1.240 2017/01/24 07:09:24 ozaki-r Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_ddb.h"
 #include "opt_inet.h"
+#include "opt_net_mpsafe.h"
 #endif
 
 #ifdef INET
 
+#include "arp.h"
 #include "bridge.h"
 
 #include <sys/param.h>
@@ -149,14 +151,17 @@ static int	arp_maxhold = 1;	/* number of packets to hold per ARP entry */
 
 int		ip_dad_count = PROBE_NUM;
 #ifdef ARP_DEBUG
-static int	arp_debug = 1;
+int		arp_debug = 1;
 #else
-static int	arp_debug = 0;
+int		arp_debug = 0;
 #endif
-#define arplog(x)	do { if (arp_debug) log x; } while (/*CONSTCOND*/ 0)
 
 static	void arp_init(void);
 
+static	void arprequest(struct ifnet *,
+    const struct in_addr *, const struct in_addr *,
+    const u_int8_t *);
+static	void arpannounce1(struct ifaddr *);
 static	struct sockaddr *arp_setgate(struct rtentry *, struct sockaddr *,
 	    const struct sockaddr *);
 static	void arptimer(void *);
@@ -174,7 +179,7 @@ static	void arp_drainstub(void);
 static void arp_dad_timer(struct ifaddr *);
 static void arp_dad_start(struct ifaddr *);
 static void arp_dad_stop(struct ifaddr *);
-static void arp_dad_duplicated(struct ifaddr *);
+static void arp_dad_duplicated(struct ifaddr *, const char *);
 
 static void arp_init_llentry(struct ifnet *, struct llentry *);
 #if NTOKEN > 0
@@ -216,34 +221,30 @@ static int log_unknown_network = 1;
  * this should be elsewhere.
  */
 
-static char *
-lla_snprintf(u_int8_t *, int);
+#define	LLA_ADDRSTRLEN	(16 * 3)
 
 static char *
-lla_snprintf(u_int8_t *adrp, int len)
+lla_snprintf(char *, u_int8_t *, int);
+
+static char *
+lla_snprintf(char *dst, u_int8_t *adrp, int len)
 {
-#define NUMBUFS 3
-	static char buf[NUMBUFS][16*3];
-	static int bnum = 0;
-
 	int i;
 	char *p;
 
-	p = buf[bnum];
+	p = dst;
 
-	*p++ = hexdigits[(*adrp)>>4];
-	*p++ = hexdigits[(*adrp++)&0xf];
+	*p++ = hexdigits[(*adrp) >> 4];
+	*p++ = hexdigits[(*adrp++) & 0xf];
 
-	for (i=1; i<len && i<16; i++) {
+	for (i = 1; i < len && i < 16; i++) {
 		*p++ = ':';
-		*p++ = hexdigits[(*adrp)>>4];
-		*p++ = hexdigits[(*adrp++)&0xf];
+		*p++ = hexdigits[(*adrp) >> 4];
+		*p++ = hexdigits[(*adrp++) & 0xf];
 	}
 
 	*p = 0;
-	p = buf[bnum];
-	bnum = (bnum + 1) % NUMBUFS;
-	return p;
+	return dst;
 }
 
 DOMAIN_DEFINE(arpdomain);	/* forward declare and add to link set */
@@ -288,6 +289,7 @@ arp_init(void)
 
 	sysctl_net_inet_arp_setup(NULL);
 	arpstat_percpu = percpu_alloc(sizeof(uint64_t) * ARP_NSTATS);
+	IFQ_LOCK_INIT(&arpintrq);
 }
 
 static void
@@ -357,6 +359,7 @@ arptimer(void *arg)
 		LLE_REMREF(lle);
 		pkts_dropped = llentry_free(lle);
 		ARP_STATADD(ARP_STAT_DFRDROPPED, pkts_dropped);
+		ARP_STATADD(ARP_STAT_DFRTOTAL, pkts_dropped);
 	} else {
 		LLE_FREE_LOCKED(lle);
 	}
@@ -446,25 +449,12 @@ arp_rtrequest(int req, struct rtentry *rt, const struct rt_addrinfo *info)
 	struct in_ifaddr *ia;
 	struct ifaddr *ifa;
 	struct ifnet *ifp = rt->rt_ifp;
+	int bound;
+	int s;
 
 	if (req == RTM_LLINFO_UPD) {
-		struct in_addr *in;
-
-		if ((ifa = info->rti_ifa) == NULL)
-			return;
-
-		in = &ifatoia(ifa)->ia_addr.sin_addr;
-
-		if (ifatoia(ifa)->ia4_flags &
-		    (IN_IFF_NOTREADY | IN_IFF_DETACHED))
-		{
-			arplog((LOG_DEBUG, "arp_request: %s not ready\n",
-			   in_fmtaddr(*in)));
-			return;
-		}
-
-		arprequest(ifa->ifa_ifp, in, in,
-		    CLLADDR(ifa->ifa_ifp->if_sadl));
+		if ((ifa = info->rti_ifa) != NULL)
+			arpannounce1(ifa);
 		return;
 	}
 
@@ -553,24 +543,24 @@ arp_rtrequest(int req, struct rtentry *rt, const struct rt_addrinfo *info)
 			if (rt->rt_flags & RTF_CONNECTED)
 				break;
 		}
+
+		bound = curlwp_bind();
 		/* Announce a new entry if requested. */
 		if (rt->rt_flags & RTF_ANNOUNCE) {
-			ia = in_get_ia_on_iface(
-			    satocsin(rt_getkey(rt))->sin_addr, ifp);
-			if (ia == NULL ||
-			    ia->ia4_flags & (IN_IFF_NOTREADY | IN_IFF_DETACHED))
-				;
-			else
-				arprequest(ifp,
-				    &satocsin(rt_getkey(rt))->sin_addr,
-				    &satocsin(rt_getkey(rt))->sin_addr,
+			struct psref psref;
+			ia = in_get_ia_on_iface_psref(
+			    satocsin(rt_getkey(rt))->sin_addr, ifp, &psref);
+			if (ia != NULL) {
+				arpannounce(ifp, &ia->ia_ifa,
 				    CLLADDR(satocsdl(gate)));
+				ia4_release(ia, &psref);
+			}
 		}
 
 		if (gate->sa_family != AF_LINK ||
 		    gate->sa_len < sockaddr_dl_measure(0, ifp->if_addrlen)) {
 			log(LOG_DEBUG, "%s: bad gateway value\n", __func__);
-			break;
+			goto out;
 		}
 
 		satosdl(gate)->sdl_type = ifp->if_type;
@@ -586,7 +576,7 @@ arp_rtrequest(int req, struct rtentry *rt, const struct rt_addrinfo *info)
 			rt->rt_flags |= RTF_BROADCAST;
 		/* There is little point in resolving the broadcast address */
 		if (rt->rt_flags & RTF_BROADCAST)
-			break;
+			goto out;
 
 		/*
 		 * When called from rt_ifa_addlocal, we cannot depend on that
@@ -599,12 +589,15 @@ arp_rtrequest(int req, struct rtentry *rt, const struct rt_addrinfo *info)
 				rt->rt_ifp = lo0ifp;
 				rt->rt_rmx.rmx_mtu = 0;
 			}
-			break;
+			goto out;
 		}
 
+		s = pserialize_read_enter();
 		ia = in_get_ia_on_iface(satocsin(rt_getkey(rt))->sin_addr, ifp);
-		if (ia == NULL)
-			break;
+		if (ia == NULL) {
+			pserialize_read_exit(s);
+			goto out;
+		}
 
 		rt->rt_expire = 0;
 		if (useloopback) {
@@ -619,7 +612,11 @@ arp_rtrequest(int req, struct rtentry *rt, const struct rt_addrinfo *info)
 		 */
 		ifa = &ia->ia_ifa;
 		if (ifa != rt->rt_ifa)
+			/* Assume it doesn't sleep */
 			rt_replace_ifa(rt, ifa);
+		pserialize_read_exit(s);
+	out:
+		curlwp_bindx(bound);
 		break;
 	}
 }
@@ -630,7 +627,7 @@ arp_rtrequest(int req, struct rtentry *rt, const struct rt_addrinfo *info)
  *	- arp header target ip address
  *	- arp header source ethernet address
  */
-void
+static void
 arprequest(struct ifnet *ifp,
     const struct in_addr *sip, const struct in_addr *tip,
     const u_int8_t *enaddr)
@@ -685,6 +682,26 @@ arprequest(struct ifnet *ifp,
 	arps[ARP_STAT_SENDREQUEST]++;
 	ARP_STAT_PUTREF();
 	if_output_lock(ifp, ifp, m, &sa, NULL);
+}
+
+void
+arpannounce(struct ifnet *ifp, struct ifaddr *ifa, const uint8_t *enaddr)
+{
+	struct in_ifaddr *ia = ifatoia(ifa);
+	struct in_addr *ip = &IA_SIN(ifa)->sin_addr;
+
+	if (ia->ia4_flags & (IN_IFF_NOTREADY | IN_IFF_DETACHED)) {
+		ARPLOG(LOG_DEBUG, "%s not ready\n", ARPLOGADDR(*ip));
+		return;
+	}
+	arprequest(ifp, ip, ip, enaddr);
+}
+
+static void
+arpannounce1(struct ifaddr *ifa)
+{
+
+	arpannounce(ifa->ifa_ifp, ifa, CLLADDR(ifa->ifa_ifp->if_sadl));
 }
 
 /*
@@ -819,6 +836,7 @@ notfound:
 			la->la_hold = next;
 			la->la_numheld--;
 			ARP_STATINC(ARP_STAT_DFRDROPPED);
+			ARP_STATINC(ARP_STAT_DFRTOTAL);
 		}
 	}
 	if (la->la_hold != NULL) {
@@ -872,7 +890,7 @@ notfound:
 			arprequest(ifp,
 			    &satocsin(_rt->rt_ifa->ifa_addr)->sin_addr,
 			    &satocsin(dst)->sin_addr, enaddr);
-			rtfree(_rt);
+			rt_unref(_rt);
 		}
 		return error;
 	}
@@ -897,15 +915,19 @@ arpintr(void)
 	int s;
 	int arplen;
 
+#ifndef NET_MPSAFE
 	mutex_enter(softnet_lock);
 	KERNEL_LOCK(1, NULL);
-	while (arpintrq.ifq_head) {
+#endif
+	for (;;) {
 		struct ifnet *rcvif;
 
-		s = splnet();
+		IFQ_LOCK(&arpintrq);
 		IF_DEQUEUE(&arpintrq, m);
-		splx(s);
-		if (m == NULL || (m->m_flags & M_PKTHDR) == 0)
+		IFQ_UNLOCK(&arpintrq);
+		if (m == NULL)
+			goto out;
+		if ((m->m_flags & M_PKTHDR) == 0)
 			panic("arpintr");
 
 		MCLAIM(m, &arpdomain.dom_mowner);
@@ -947,23 +969,27 @@ badlen:
 		}
 		m_freem(m);
 	}
+out:
+#ifndef NET_MPSAFE
 	KERNEL_UNLOCK_ONE(NULL);
 	mutex_exit(softnet_lock);
+#else
+	return; /* XXX gcc */
+#endif
 }
 
 /*
- * ARP for Internet protocols on 10 Mb/s Ethernet.
- * Algorithm is that given in RFC 826.
- * In addition, a sanity check is performed on the sender
- * protocol address, to catch impersonators.
- * We no longer handle negotiations for use of trailer protocol:
- * Formerly, ARP replied for protocol type ETHERTYPE_TRAIL sent
- * along with IP replies if we wanted trailers sent to us,
- * and also sent them in response to IP replies.
- * This allowed either end to announce the desire to receive
- * trailer packets.
- * We no longer reply to requests for ETHERTYPE_TRAIL protocol either,
- * but formerly didn't normally send requests.
+ * ARP for Internet protocols on 10 Mb/s Ethernet. Algorithm is that given in
+ * RFC 826. In addition, a sanity check is performed on the sender protocol
+ * address, to catch impersonators.
+ *
+ * We no longer handle negotiations for use of trailer protocol: formerly, ARP
+ * replied for protocol type ETHERTYPE_TRAIL sent along with IP replies if we
+ * wanted trailers sent to us, and also sent them in response to IP replies.
+ * This allowed either end to announce the desire to receive trailer packets.
+ *
+ * We no longer reply to requests for ETHERTYPE_TRAIL protocol either, but
+ * formerly didn't normally send requests.
  */
 static void
 in_arpinput(struct mbuf *m)
@@ -971,7 +997,7 @@ in_arpinput(struct mbuf *m)
 	struct arphdr *ah;
 	struct ifnet *ifp, *rcvif = NULL;
 	struct llentry *la = NULL;
-	struct in_ifaddr *ia;
+	struct in_ifaddr *ia = NULL;
 #if NBRIDGE > 0
 	struct in_ifaddr *bridge_ia = NULL;
 #endif
@@ -983,7 +1009,10 @@ in_arpinput(struct mbuf *m)
 	int op;
 	void *tha;
 	uint64_t *arps;
-	struct psref psref;
+	struct psref psref, psref_ia;
+	int s;
+	char llabuf[LLA_ADDRSTRLEN];
+	char ipbuf[INET_ADDRSTRLEN];
 
 	if (__predict_false(m_makewritable(&m, 0, m->m_pkthdr.len, M_DONTWAIT)))
 		goto out;
@@ -993,9 +1022,10 @@ in_arpinput(struct mbuf *m)
 	rcvif = ifp = m_get_rcvif_psref(m, &psref);
 	if (__predict_false(rcvif == NULL))
 		goto drop;
+
 	/*
-	 * Fix up ah->ar_hrd if necessary, before using ar_tha() or
-	 * ar_tpa().
+	 * Fix up ah->ar_hrd if necessary, before using ar_tha() or ar_tpa().
+	 * XXX check ar_hrd more strictly?
 	 */
 	switch (ifp->if_type) {
 	case IFT_IEEE1394:
@@ -1003,27 +1033,28 @@ in_arpinput(struct mbuf *m)
 			;
 		else {
 			/* XXX this is to make sure we compute ar_tha right */
-			/* XXX check ar_hrd more strictly? */
 			ah->ar_hrd = htons(ARPHRD_IEEE1394);
 		}
 		break;
 	default:
-		/* XXX check ar_hrd? */
 		break;
 	}
 
-	memcpy(&isaddr, ar_spa(ah), sizeof (isaddr));
-	memcpy(&itaddr, ar_tpa(ah), sizeof (itaddr));
+	if (ah->ar_pln != sizeof(struct in_addr))
+		goto drop;
+
+	memcpy(&isaddr, ar_spa(ah), sizeof(isaddr));
+	memcpy(&itaddr, ar_tpa(ah), sizeof(itaddr));
 
 	if (m->m_flags & (M_BCAST|M_MCAST))
 		ARP_STATINC(ARP_STAT_RCVMCAST);
-
 
 	/*
 	 * Search for a matching interface address
 	 * or any address on the interface to use
 	 * as a dummy address in the rest of this function
 	 */
+	s = pserialize_read_enter();
 	IN_ADDRHASH_READER_FOREACH(ia, itaddr.s_addr) {
 		if (!in_hosteq(ia->ia_addr.sin_addr, itaddr))
 			continue;
@@ -1032,7 +1063,8 @@ in_arpinput(struct mbuf *m)
 		    ((ia->ia_ifp->if_flags & (IFF_UP|IFF_RUNNING)) ==
 		    (IFF_UP|IFF_RUNNING))) {
 			index++;
-			if (ia->ia_ifp == rcvif &&
+			/* XXX: ar_hln? */
+			if (ia->ia_ifp == rcvif && (ah->ar_hln >= 6) &&
 			    carp_iamatch(ia, ar_sha(ah),
 			    &count, index)) {
 				break;
@@ -1064,11 +1096,22 @@ in_arpinput(struct mbuf *m)
 		ifp = bridge_ia->ia_ifp;
 	}
 #endif
+	if (ia != NULL)
+		ia4_acquire(ia, &psref_ia);
+	pserialize_read_exit(s);
+
+	if (ah->ar_hln != ifp->if_addrlen) {
+		ARP_STATINC(ARP_STAT_RCVBADLEN);
+		log(LOG_WARNING,
+		    "arp from %s: addr len: new %d, i/f %d (ignored)\n",
+		    in_fmtaddr(ipbuf, isaddr), ah->ar_hln, ifp->if_addrlen);
+		goto out;
+	}
 
 	if (ia == NULL) {
-		ia = in_get_ia_on_iface(isaddr, rcvif);
+		ia = in_get_ia_on_iface_psref(isaddr, rcvif, &psref_ia);
 		if (ia == NULL) {
-			ia = in_get_ia_from_ifp(ifp);
+			ia = in_get_ia_from_ifp_psref(ifp, &psref_ia);
 			if (ia == NULL) {
 				ARP_STATINC(ARP_STAT_RCVNOINT);
 				goto out;
@@ -1089,7 +1132,7 @@ in_arpinput(struct mbuf *m)
 		ARP_STATINC(ARP_STAT_RCVBCASTSHA);
 		log(LOG_ERR,
 		    "%s: arp: link address is broadcast for IP address %s!\n",
-		    ifp->if_xname, in_fmtaddr(isaddr));
+		    ifp->if_xname, in_fmtaddr(ipbuf, isaddr));
 		goto out;
 	}
 
@@ -1101,39 +1144,27 @@ in_arpinput(struct mbuf *m)
 	else if (in_hosteq(isaddr, myaddr))
 		ARP_STATINC(ARP_STAT_RCVLOCALSPA);
 
-	if (in_nullhost(itaddr))
+	/*
+	 * If the target IP address is zero, ignore the packet.
+	 * This prevents the code below from trying to answer
+	 * when we are using IP address zero (booting).
+	 */
+	if (in_nullhost(itaddr)) {
 		ARP_STATINC(ARP_STAT_RCVZEROTPA);
+		goto out;
+	}
 
-	/* DAD check, RFC 5227 2.1.1, Probe Details */
+	/* DAD check, RFC 5227 */
 	if (in_hosteq(isaddr, myaddr) ||
 	    (in_nullhost(isaddr) && in_hosteq(itaddr, myaddr)))
 	{
-		/* If our address is tentative, mark it as duplicated */
-		if (ia->ia4_flags & IN_IFF_TENTATIVE)
-			arp_dad_duplicated((struct ifaddr *)ia);
-		/* If our address is unuseable, don't reply */
-		if (ia->ia4_flags & (IN_IFF_NOTREADY | IN_IFF_DETACHED))
-			goto out;
-	}
-
-	/*
-	 * If the target IP address is zero, ignore the packet.
-	 * This prevents the code below from tring to answer
-	 * when we are using IP address zero (booting).
-	 */
-	if (in_nullhost(itaddr))
+		arp_dad_duplicated((struct ifaddr *)ia,
+		    lla_snprintf(llabuf, ar_sha(ah), ah->ar_hln));
 		goto out;
+	}
 
 	if (in_nullhost(isaddr))
 		goto reply;
-
-	if (in_hosteq(isaddr, myaddr)) {
-		log(LOG_ERR,
-		   "duplicate IP address %s sent from link address %s\n",
-		   in_fmtaddr(isaddr), lla_snprintf(ar_sha(ah), ah->ar_hln));
-		itaddr = myaddr;
-		goto reply;
-	}
 
 	if (in_hosteq(itaddr, myaddr))
 		la = arpcreate(ifp, m, &isaddr, NULL, 1);
@@ -1151,8 +1182,8 @@ in_arpinput(struct mbuf *m)
 			log(LOG_INFO,
 			    "%s tried to overwrite permanent arp info"
 			    " for %s\n",
-			    lla_snprintf(ar_sha(ah), ah->ar_hln),
-			    in_fmtaddr(isaddr));
+			    lla_snprintf(llabuf, ar_sha(ah), ah->ar_hln),
+			    in_fmtaddr(ipbuf, isaddr));
 			goto out;
 		} else if (la->lle_tbl->llt_ifp != ifp) {
 			/* XXX should not happen? */
@@ -1162,8 +1193,8 @@ in_arpinput(struct mbuf *m)
 			log(LOG_INFO,
 			    "%s on %s tried to overwrite "
 			    "arp info for %s on %s\n",
-			    lla_snprintf(ar_sha(ah), ah->ar_hln),
-			    ifp->if_xname, in_fmtaddr(isaddr),
+			    lla_snprintf(llabuf, ar_sha(ah), ah->ar_hln),
+			    ifp->if_xname, in_fmtaddr(ipbuf, isaddr),
 			    la->lle_tbl->llt_ifp->if_xname);
 				goto out;
 		} else {
@@ -1171,8 +1202,8 @@ in_arpinput(struct mbuf *m)
 			if (log_movements)
 				log(LOG_INFO, "arp info overwritten "
 				    "for %s by %s\n",
-				    in_fmtaddr(isaddr),
-				    lla_snprintf(ar_sha(ah),
+				    in_fmtaddr(ipbuf, isaddr),
+				    lla_snprintf(llabuf, ar_sha(ah),
 				    ah->ar_hln));
 		}
 	}
@@ -1188,18 +1219,9 @@ in_arpinput(struct mbuf *m)
 		ARP_STATINC(ARP_STAT_RCVLENCHG);
 		log(LOG_WARNING,
 		    "arp from %s: new addr len %d, was %d\n",
-		    in_fmtaddr(isaddr), ah->ar_hln, sdl->sdl_alen);
+		    in_fmtaddr(ipbuf, isaddr), ah->ar_hln, sdl->sdl_alen);
 	}
 #endif
-
-	if (ifp->if_addrlen != ah->ar_hln) {
-		ARP_STATINC(ARP_STAT_RCVBADLEN);
-		log(LOG_WARNING,
-		    "arp from %s: addr len: new %d, i/f %d (ignored)\n",
-		    in_fmtaddr(isaddr), ah->ar_hln,
-		    ifp->if_addrlen);
-		goto reply;
-	}
 
 #if NTOKEN > 0
 	/*
@@ -1230,7 +1252,7 @@ in_arpinput(struct mbuf *m)
 #endif /* NTOKEN > 0 */
 
 	KASSERT(sizeof(la->ll_addr) >= ifp->if_addrlen);
-	(void)memcpy(&la->ll_addr, ar_sha(ah), ifp->if_addrlen);
+	memcpy(&la->ll_addr, ar_sha(ah), ifp->if_addrlen);
 	la->la_flags |= LLE_VALID;
 	if ((la->la_flags & LLE_STATIC) == 0) {
 		la->la_expire = time_uptime + arpt_keep;
@@ -1255,6 +1277,7 @@ in_arpinput(struct mbuf *m)
 		 */
 		LLE_WUNLOCK(la);
 		ARP_STATADD(ARP_STAT_DFRSENT, n);
+		ARP_STATADD(ARP_STAT_DFRTOTAL, n);
 		for (; m_hold != NULL; m_hold = m_hold_next) {
 			m_hold_next = m_hold->m_nextpkt;
 			m_hold->m_nextpkt = NULL;
@@ -1276,7 +1299,7 @@ reply:
 	}
 	ARP_STATINC(ARP_STAT_RCVREQUEST);
 	if (in_hosteq(itaddr, myaddr)) {
-		/* If our address is unuseable, don't reply */
+		/* If our address is unusable, don't reply */
 		if (ia->ia4_flags & (IN_IFF_NOTREADY | IN_IFF_DETACHED))
 			goto out;
 		/* I am the target */
@@ -1289,7 +1312,6 @@ reply:
 		struct llentry *lle = NULL;
 		struct sockaddr_in sin;
 #if NCARP > 0
-		int s;
 		struct ifnet *_rcvif = m_get_rcvif(m, &s);
 		if (ifp->if_type == IFT_CARP && _rcvif->if_type != IFT_CARP)
 			goto out;
@@ -1305,8 +1327,9 @@ reply:
 		IF_AFDATA_RUNLOCK(ifp);
 
 		if ((lle != NULL) && (lle->la_flags & LLE_PUB)) {
-			(void)memcpy(tha, ar_sha(ah), ah->ar_hln);
-			(void)memcpy(ar_sha(ah), &lle->ll_addr, ah->ar_hln);
+			if (tha)
+				memcpy(tha, ar_sha(ah), ah->ar_hln);
+			memcpy(ar_sha(ah), &lle->ll_addr, ah->ar_hln);
 			LLE_RUNLOCK(lle);
 		} else {
 			if (lle != NULL)
@@ -1314,6 +1337,7 @@ reply:
 			goto drop;
 		}
 	}
+	ia4_release(ia, &psref_ia);
 
 	memcpy(ar_tpa(ah), ar_spa(ah), ah->ar_pln);
 	memcpy(ar_spa(ah), &itaddr, ah->ar_pln);
@@ -1328,7 +1352,6 @@ reply:
 		m->m_flags |= M_BCAST;
 		m->m_len = sizeof(*ah) + (2 * ah->ar_pln) + ah->ar_hln;
 		break;
-
 	default:
 		m->m_flags &= ~(M_BCAST|M_MCAST); /* never reply by broadcast */
 		m->m_len = sizeof(*ah) + (2 * ah->ar_pln) + (2 * ah->ar_hln);
@@ -1350,6 +1373,8 @@ out:
 	if (la != NULL)
 		LLE_WUNLOCK(la);
 drop:
+	if (ia != NULL)
+		ia4_release(ia, &psref_ia);
 	if (rcvif != NULL)
 		m_put_rcvif_psref(rcvif, &psref);
 	m_freem(m);
@@ -1430,8 +1455,6 @@ arp_ifinit(struct ifnet *ifp, struct ifaddr *ifa)
 	    (ia->ia4_flags & (IN_IFF_NOTREADY | IN_IFF_DETACHED)) == 0) {
 		struct llentry *lle;
 
-		arprequest(ifp, ip, ip, CLLADDR(ifp->if_sadl));
-
 		/*
 		 * interface address is considered static entry
 		 * because the output of the arp utility shows
@@ -1454,10 +1477,19 @@ arp_ifinit(struct ifnet *ifp, struct ifaddr *ifa)
 	ifa->ifa_flags |= RTF_CONNECTED;
 
 	/* ARP will handle DAD for this address. */
-	if (ia->ia4_flags & IN_IFF_TRYTENTATIVE) {
-		ia->ia4_flags |= IN_IFF_TENTATIVE;
+	if (in_nullhost(*ip)) {
+		if (ia->ia_dad_stop != NULL)	/* safety */
+			ia->ia_dad_stop(ifa);
+		ia->ia_dad_start = NULL;
+		ia->ia_dad_stop = NULL;
+		ia->ia4_flags &= ~IN_IFF_TENTATIVE;
+	} else {
 		ia->ia_dad_start = arp_dad_start;
 		ia->ia_dad_stop = arp_dad_stop;
+		if (ia->ia4_flags & IN_IFF_TRYTENTATIVE)
+			ia->ia4_flags |= IN_IFF_TENTATIVE;
+		else
+			arpannounce1(ifa);
 	}
 }
 
@@ -1505,7 +1537,11 @@ static void
 arp_dad_stoptimer(struct dadq *dp)
 {
 
+#ifdef NET_MPSAFE
+	callout_halt(&dp->dad_timer_ch, NULL);
+#else
 	callout_halt(&dp->dad_timer_ch, softnet_lock);
+#endif
 }
 
 static void
@@ -1537,6 +1573,7 @@ arp_dad_start(struct ifaddr *ifa)
 {
 	struct in_ifaddr *ia = (struct in_ifaddr *)ifa;
 	struct dadq *dp;
+	char ipbuf[INET_ADDRSTRLEN];
 
 	if (!dad_init) {
 		TAILQ_INIT(&dadq);
@@ -1551,17 +1588,14 @@ arp_dad_start(struct ifaddr *ifa)
 	if (!(ia->ia4_flags & IN_IFF_TENTATIVE)) {
 		log(LOG_DEBUG,
 		    "%s: called with non-tentative address %s(%s)\n", __func__,
-		    in_fmtaddr(ia->ia_addr.sin_addr),
+		    in_fmtaddr(ipbuf, ia->ia_addr.sin_addr),
 		    ifa->ifa_ifp ? if_name(ifa->ifa_ifp) : "???");
 		return;
 	}
 	if (!ip_dad_count) {
-		struct in_addr *ip = &IA_SIN(ifa)->sin_addr;
-
 		ia->ia4_flags &= ~IN_IFF_TENTATIVE;
 		rt_newaddrmsg(RTM_NEWADDR, ifa, 0, NULL);
-		arprequest(ifa->ifa_ifp, ip, ip,
-		    CLLADDR(ifa->ifa_ifp->if_sadl));
+		arpannounce1(ifa);
 		return;
 	}
 	KASSERT(ifa->ifa_ifp != NULL);
@@ -1579,7 +1613,7 @@ arp_dad_start(struct ifaddr *ifa)
 	if (dp == NULL) {
 		mutex_exit(&arp_dad_lock);
 		log(LOG_ERR, "%s: memory allocation failed for %s(%s)\n",
-		    __func__, in_fmtaddr(ia->ia_addr.sin_addr),
+		    __func__, in_fmtaddr(ipbuf, ia->ia_addr.sin_addr),
 		    ifa->ifa_ifp ? if_name(ifa->ifa_ifp) : "???");
 		return;
 	}
@@ -1597,8 +1631,8 @@ arp_dad_start(struct ifaddr *ifa)
 	dp->dad_arp_acount = dp->dad_arp_ocount = dp->dad_arp_tcount = 0;
 	TAILQ_INSERT_TAIL(&dadq, (struct dadq *)dp, dad_list);
 
-	arplog((LOG_DEBUG, "%s: starting DAD for %s\n", if_name(ifa->ifa_ifp),
-	    in_fmtaddr(ia->ia_addr.sin_addr)));
+	ARPLOG(LOG_DEBUG, "%s: starting DAD for %s\n", if_name(ifa->ifa_ifp),
+	    ARPLOGADDR(ia->ia_addr.sin_addr));
 
 	arp_dad_starttimer(dp, cprng_fast32() % (PROBE_WAIT * hz));
 
@@ -1640,10 +1674,12 @@ arp_dad_timer(struct ifaddr *ifa)
 {
 	struct in_ifaddr *ia = (struct in_ifaddr *)ifa;
 	struct dadq *dp;
-	struct in_addr *ip;
+	char ipbuf[INET_ADDRSTRLEN];
 
+#ifndef NET_MPSAFE
 	mutex_enter(softnet_lock);
 	KERNEL_LOCK(1, NULL);
+#endif
 	mutex_enter(&arp_dad_lock);
 
 	/* Sanity check */
@@ -1658,22 +1694,22 @@ arp_dad_timer(struct ifaddr *ifa)
 	}
 	if (ia->ia4_flags & IN_IFF_DUPLICATED) {
 		log(LOG_ERR, "%s: called with duplicate address %s(%s)\n",
-		    __func__, in_fmtaddr(ia->ia_addr.sin_addr),
+		    __func__, in_fmtaddr(ipbuf, ia->ia_addr.sin_addr),
 		    ifa->ifa_ifp ? if_name(ifa->ifa_ifp) : "???");
 		goto done;
 	}
 	if ((ia->ia4_flags & IN_IFF_TENTATIVE) == 0 && dp->dad_arp_acount == 0)
 	{
 		log(LOG_ERR, "%s: called with non-tentative address %s(%s)\n",
-		    __func__, in_fmtaddr(ia->ia_addr.sin_addr),
+		    __func__, in_fmtaddr(ipbuf, ia->ia_addr.sin_addr),
 		    ifa->ifa_ifp ? if_name(ifa->ifa_ifp) : "???");
 		goto done;
 	}
 
 	/* timeouted with IFF_{RUNNING,UP} check */
 	if (dp->dad_arp_tcount > dad_maxtry) {
-		arplog((LOG_INFO, "%s: could not run DAD, driver problem?\n",
-		    if_name(ifa->ifa_ifp)));
+		ARPLOG(LOG_INFO, "%s: could not run DAD, driver problem?\n",
+		    if_name(ifa->ifa_ifp));
 
 		TAILQ_REMOVE(&dadq, dp, dad_list);
 		free(dp, M_IPARP);
@@ -1705,10 +1741,9 @@ arp_dad_timer(struct ifaddr *ifa)
 		 */
 		ia->ia4_flags &= ~IN_IFF_TENTATIVE;
 		rt_newaddrmsg(RTM_NEWADDR, ifa, 0, NULL);
-		arplog((LOG_DEBUG,
+		ARPLOG(LOG_DEBUG,
 		    "%s: DAD complete for %s - no duplicates found\n",
-		    if_name(ifa->ifa_ifp),
-		    in_fmtaddr(ia->ia_addr.sin_addr)));
+		    if_name(ifa->ifa_ifp), ARPLOGADDR(ia->ia_addr.sin_addr));
 		dp->dad_arp_announce = ANNOUNCE_NUM;
 		goto announce;
 	} else if (dp->dad_arp_acount < dp->dad_arp_announce) {
@@ -1716,18 +1751,15 @@ announce:
 		/*
 		 * Announce the address.
 		 */
-		ip = &IA_SIN(ifa)->sin_addr;
-		arprequest(ifa->ifa_ifp, ip, ip,
-		    CLLADDR(ifa->ifa_ifp->if_sadl));
+		arpannounce1(ifa);
 		dp->dad_arp_acount++;
 		if (dp->dad_arp_acount < dp->dad_arp_announce) {
 			arp_dad_starttimer(dp, ANNOUNCE_INTERVAL * hz);
 			goto done;
 		}
-		arplog((LOG_DEBUG,
+		ARPLOG(LOG_DEBUG,
 		    "%s: ARP announcement complete for %s\n",
-		    if_name(ifa->ifa_ifp),
-		    in_fmtaddr(ia->ia_addr.sin_addr)));
+		    if_name(ifa->ifa_ifp), ARPLOGADDR(ia->ia_addr.sin_addr));
 	}
 
 	TAILQ_REMOVE(&dadq, dp, dad_list);
@@ -1737,46 +1769,55 @@ announce:
 
 done:
 	mutex_exit(&arp_dad_lock);
+#ifndef NET_MPSAFE
 	KERNEL_UNLOCK_ONE(NULL);
 	mutex_exit(softnet_lock);
+#endif
 }
 
 static void
-arp_dad_duplicated(struct ifaddr *ifa)
+arp_dad_duplicated(struct ifaddr *ifa, const char *sha)
 {
 	struct in_ifaddr *ia = (struct in_ifaddr *)ifa;
-	struct ifnet *ifp;
-	struct dadq *dp;
+	struct ifnet *ifp = ifa->ifa_ifp;
+	char ipbuf[INET_ADDRSTRLEN];
+	const char *iastr;
 
-	mutex_enter(&arp_dad_lock);
-	dp = arp_dad_find(ifa);
-	if (dp == NULL) {
-		mutex_exit(&arp_dad_lock);
-		/* DAD seems to be stopping, so do nothing. */
+	iastr = in_fmtaddr(ipbuf, ia->ia_addr.sin_addr);
+
+	if (ia->ia4_flags & (IN_IFF_TENTATIVE|IN_IFF_DUPLICATED)) {
+		log(LOG_ERR,
+		    "%s: DAD duplicate address %s from %s\n",
+		    if_name(ifp), iastr, sha);
+	} else if (ia->ia_dad_defended == 0 ||
+		   ia->ia_dad_defended < time_uptime - DEFEND_INTERVAL) {
+		ia->ia_dad_defended = time_uptime;
+		arpannounce1(ifa);
+		log(LOG_ERR,
+		    "%s: DAD defended address %s from %s\n",
+		    if_name(ifp), iastr, sha);
 		return;
+	} else {
+		/* If DAD is disabled, just report the duplicate. */
+		if (ip_dad_count == 0) {
+			log(LOG_ERR,
+			    "%s: DAD ignoring duplicate address %s from %s\n",
+			    if_name(ifp), iastr, sha);
+			return;
+		}
+		log(LOG_ERR,
+		    "%s: DAD defence failed for %s from %s\n",
+		    if_name(ifp), iastr, sha);
 	}
 
-	ifp = ifa->ifa_ifp;
-	log(LOG_ERR,
-	    "%s: DAD detected duplicate IPv4 address %s: ARP out=%d\n",
-	    if_name(ifp), in_fmtaddr(ia->ia_addr.sin_addr),
-	    dp->dad_arp_ocount);
+	arp_dad_stop(ifa);
 
 	ia->ia4_flags &= ~IN_IFF_TENTATIVE;
-	ia->ia4_flags |= IN_IFF_DUPLICATED;
-
-	/* We are done with DAD, with duplicated address found. (failure) */
-	arp_dad_stoptimer(dp);
-
-	/* Inform the routing socket that DAD has completed */
-	rt_newaddrmsg(RTM_NEWADDR, ifa, 0, NULL);
-
-	TAILQ_REMOVE(&dadq, dp, dad_list);
-	mutex_exit(&arp_dad_lock);
-
-	free(dp, M_IPARP);
-	dp = NULL;
-	ifafree(ifa);
+	if ((ia->ia4_flags & IN_IFF_DUPLICATED) == 0) {
+		ia->ia4_flags |= IN_IFF_DUPLICATED;
+		/* Inform the routing socket of the duplicate address */
+		rt_newaddrmsg(RTM_NEWADDR, ifa, 0, NULL);
+	}
 }
 
 /*
@@ -1864,6 +1905,10 @@ in_revarpinput(struct mbuf *m)
 		goto wake;
 	tha = ar_tha(ah);
 	if (tha == NULL)
+		goto out;
+	if (ah->ar_pln != sizeof(struct in_addr))
+		goto out;
+	if (ah->ar_hln != rcvif->if_sadl->sdl_alen)
 		goto out;
 	if (memcmp(tha, CLLADDR(rcvif->if_sadl), rcvif->if_sadl->sdl_alen))
 		goto out;
