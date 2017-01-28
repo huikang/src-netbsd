@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2017, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -155,7 +155,7 @@ UtDisplaySupportedTables (
     /* All ACPI tables with the common table header */
 
     printf ("\n  Supported ACPI tables:\n");
-    for (TableData = AcpiSupportedTables, i = 1;
+    for (TableData = Gbl_AcpiSupportedTables, i = 1;
          TableData->Signature; TableData++, i++)
     {
         printf ("%8u) %s    %s\n", i,
@@ -401,8 +401,8 @@ UtDisplaySummary (
     {
         /* Compiler name and version number */
 
-        FlPrintFile (FileId, "%s version %X%s [%s]\n\n",
-            ASL_COMPILER_NAME, (UINT32) ACPI_CA_VERSION, ACPI_WIDTH, ACPI_DATE);
+        FlPrintFile (FileId, "%s version %X [%s]\n\n",
+            ASL_COMPILER_NAME, (UINT32) ACPI_CA_VERSION, __DATE__);
     }
 
     /* Summary of main input and output files */
@@ -909,7 +909,7 @@ UtAttachNamepathToOwner (
  *
  * FUNCTION:    UtDoConstant
  *
- * PARAMETERS:  String              - Hex, Octal, or Decimal string
+ * PARAMETERS:  String              - Hexadecimal or decimal string
  *
  * RETURN:      Converted Integer
  *
@@ -926,9 +926,7 @@ UtDoConstant (
     char                    ErrBuf[64];
 
 
-    Status = AcpiUtStrtoul64 (String, ACPI_ANY_BASE,
-        ACPI_MAX64_BYTE_WIDTH, &Converted);
-
+    Status = AcpiUtStrtoul64 (String, ACPI_STRTOUL_64BIT, &Converted);
     if (ACPI_FAILURE (Status))
     {
         snprintf (ErrBuf, sizeof(ErrBuf), "%s %s\n", "Conversion error:",
@@ -938,64 +936,3 @@ UtDoConstant (
 
     return (Converted);
 }
-
-
-#ifdef _OBSOLETE_FUNCTIONS
-/* Removed 01/2016 */
-
-/*******************************************************************************
- *
- * FUNCTION:    UtConvertByteToHex
- *
- * PARAMETERS:  RawByte             - Binary data
- *              Buffer              - Pointer to where the hex bytes will be
- *                                    stored
- *
- * RETURN:      Ascii hex byte is stored in Buffer.
- *
- * DESCRIPTION: Perform hex-to-ascii translation. The return data is prefixed
- *              with "0x"
- *
- ******************************************************************************/
-
-void
-UtConvertByteToHex (
-    UINT8                   RawByte,
-    UINT8                   *Buffer)
-{
-
-    Buffer[0] = '0';
-    Buffer[1] = 'x';
-
-    Buffer[2] = (UINT8) AcpiUtHexToAsciiChar (RawByte, 4);
-    Buffer[3] = (UINT8) AcpiUtHexToAsciiChar (RawByte, 0);
-}
-
-
-/*******************************************************************************
- *
- * FUNCTION:    UtConvertByteToAsmHex
- *
- * PARAMETERS:  RawByte             - Binary data
- *              Buffer              - Pointer to where the hex bytes will be
- *                                    stored
- *
- * RETURN:      Ascii hex byte is stored in Buffer.
- *
- * DESCRIPTION: Perform hex-to-ascii translation. The return data is prefixed
- *              with '0', and a trailing 'h' is added.
- *
- ******************************************************************************/
-
-void
-UtConvertByteToAsmHex (
-    UINT8                   RawByte,
-    UINT8                   *Buffer)
-{
-
-    Buffer[0] = '0';
-    Buffer[1] = (UINT8) AcpiUtHexToAsciiChar (RawByte, 4);
-    Buffer[2] = (UINT8) AcpiUtHexToAsciiChar (RawByte, 0);
-    Buffer[3] = 'h';
-}
-#endif /* OBSOLETE_FUNCTIONS */

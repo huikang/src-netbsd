@@ -1,4 +1,4 @@
-/*	$NetBSD: mipsX_subr.S,v 1.74 2016/07/21 12:17:07 skrll Exp $	*/
+/*	$NetBSD: mipsX_subr.S,v 1.96 2016/11/19 09:05:50 skrll Exp $	*/
 
 /*
  * Copyright 2002 Wasabi Systems, Inc.
@@ -136,12 +136,6 @@
 
 #if defined(MIPS1) || defined(MIPS2)
 #error use locore_mips1.S
-#endif
-
-#if defined(MIPS3)
-#define	MFC0_HAZARD	nop
-#else
-#define	MFC0_HAZARD	/* nothing */
 #endif
 
 #if defined(__mips_o32)
@@ -360,7 +354,7 @@
  *
  * Loongson2 processors don't have separate tlbmiss and xtlbmiss handlers;
  * so we have to check for useg addresses in tlb_miss. The good news is that
- * we can use 64 intructions form tlbmiss instead of 32.
+ * we can use 64 intructions from tlbmiss instead of 32.
  *
  *----------------------------------------------------------------------------
  */
@@ -373,24 +367,21 @@ VECTOR(MIPSX(tlb_miss), unknown)
 	nop					#01: nop
 	PTR_SRL k1, k0, 31			#02: clear useg bits
 	beqz	k1, 2f				#03: k1==0 -> useg address
-	 PTR_SRL k1,k0,XSEGSHIFT+XSEGLENGTH+2	#04: clear valid bits
+	 PTR_SLL k1, k0, 2			#0x: clear top bits
+	PTR_SRL k1, XSEGSHIFT+XSEGLENGTH+2	#04: clear valid bits
 	bnez	k1, MIPSX(nopagetable)		#05: not legal address
-	 PTR_SRL k0, XSEGSHIFT - PTR_SCALESHIFT #06: k0=seg offset (almost)
+	 PTR_SRA k0, XSEGSHIFT - PTR_SCALESHIFT #06: k0=seg offset (almost)
 	bgez	k0, 1f				#07: k0<0 -> kernel fault
 	 lui	k1, %hi(CPUVAR(PMAP_SEGTAB))	#08: k1=hi of segtab
 	PTR_ADDI k1,  1 << PTR_SCALESHIFT	#09: kernel segtab entry
 1:
-	andi	k0, NBPG-(1<<PTR_SCALESHIFT)	#0a: k0=seg offset (mask 0x3)
+	andi	k0, (NSEGPG-1)<<PTR_SCALESHIFT	#0a: k0=seg offset (mask 0x3)
 	PTR_L	k1, %lo(CPUVAR(PMAP_SEGTAB))(k1)#0b: k1=segment tab
 	PTR_ADDU k1, k0				#0c: k1=seg entry address
 	dmfc0	k0, MIPS_COP_0_BAD_VADDR	#0d: k0=bad address (again)
 	PTR_L	k1, 0(k1)			#0e: k1=seg entry
 	b	MIPSX(tlb_miss_common)		#0f
-#ifdef MIPSNNR2
-	 _EXT	k0, k0, SEGSHIFT, SEGLENGTH	#0f: k0=seg index
-#else
-	 PTR_SRL k0, SEGSHIFT - PTR_SCALESHIFT	#0f: k0=seg offset (almost)
-#endif
+	 PTR_SRL k0, SEGSHIFT - PTR_SCALESHIFT	#10: k0=seg offset (almost)
 #endif /* LP64 */
 2: /* handle useg addresses */
 	lui	k1, %hi(CPUVAR(PMAP_SEG0TAB))	#11: k1=hi of seg0tab
@@ -647,17 +638,16 @@ _VECTOR_END(MIPSX(exception))
  */
 VECTOR(MIPSX(intr), unknown)
 	.set	noat
-	mfc0	k1, MIPS_COP_0_STATUS		#00: get the status register
+	mfc0	k0, MIPS_COP_0_STATUS		#00: get the status register
 	MFC0_HAZARD				#01: stall
-	and	k1, k1, MIPS3_SR_KSU_USER	#02: test for user mode
-	PTR_LA	k0, MIPSX(user_intr)		#03: assume user mode
-	bnez	k1, 1f				#04: yep, do it
-	 nop					#05:  branch deay
-	PTR_LA	k0, MIPSX(kern_intr)		#06: nope, kernel intr
+	and	k0, k0, MIPS3_SR_KSU_USER	#02: test for user mode
+	bnez	k0, 1f				#03: yep, do it
+	 nop					#04:  branch deay
+	j	MIPSX(kern_intr)		#05: nope, kernel intr
 1:
-	lui	k1, %hi(CPUVAR(CURLWP))		#07: k1=hi of curlwp
-	jr	k0				#08: jump to the function
-	 PTR_L	k1, %lo(CPUVAR(CURLWP))(k1)	#09: k1=lo of curlwp
+	lui	k1, %hi(CPUVAR(CURLWP))		#06: k1=hi of curlwp
+	j	MIPSX(user_intr)		#07: user intr
+	 PTR_L	k1, %lo(CPUVAR(CURLWP))(k1)	#08: k1=lo of curlwp
 	.set	at
 _VECTOR_END(MIPSX(intr))
 
@@ -706,7 +696,7 @@ MIPSX(slowfault):
 NESTED_NOPROFILE(MIPSX(kern_gen_exception), KERNFRAME_SIZ, ra)
 	.set	noat
 	.mask	0x80000000, -4
-#if defined(PARANOIA) || 1
+#if defined(PARANOIA)
 	PTR_L	k0, L_PCB(MIPS_CURLWP)
 	slt	k0, k0, sp		# k0 = L_PCB(MIPS_CURLWP) < sp
 1:	beqz	k0, 1b			# loop forever if false
@@ -1539,10 +1529,16 @@ NESTED_NOPROFILE(MIPSX(user_intr), CALLFRAME_SIZ, ra)
 	 */
 	mfc0	v1, MIPS_COP_0_STATUS
 #ifdef NOFPU
+	/*
+	 * enter kernel mode
+	 */
 	MFC0_HAZARD
-	and	v0, v1, MIPS_SR_KSU_MASK|MIPS_SR_EXL
-	xor	v0, v1				# clear the bits
+	and	v0, v1, MIPS_SR_EXL|MIPS_SR_KSU_MASK # bits to clear
+	xor	v0, v1				# clear them.
 #else
+	/*
+	 * Turn off FPU and enter kernel mode
+	 */
 	lui	v0, %hi(~(MIPS_SR_COP_1_BIT|MIPS_SR_EXL|MIPS_SR_KSU_MASK))
 	addiu	v0, %lo(~(MIPS_SR_COP_1_BIT|MIPS_SR_EXL|MIPS_SR_KSU_MASK))
 	and	v0, v1
@@ -1728,18 +1724,21 @@ NESTED_NOPROFILE(MIPSX(systemcall), CALLFRAME_SIZ, ra)
 #endif
 	PTR_L	s0, L_PROC(MIPS_CURLWP)		# curlwp->l_proc
 	PTR_L	t9, P_MD_SYSCALL(s0)		# t9 = syscall
+#ifdef NOFPU
+	/*
+	 * enter kernel mode
+	 */
+	and	t0, a1, MIPS_SR_EXL|MIPS_SR_KSU_MASK # bits to clear
+	xor	t0, a1				# clear them.
+#else
 	/*
 	 * Turn off FPU and enter kernel mode
 	 */
-#ifdef NOFPU
-	and	t0, a1, MIPS_SR_EXL|MIPS_SR_KSU_MASK
-	xor	t0, a1				# turns off the FPU & ints on
-#else
 	lui	t0, %hi(~(MIPS_SR_COP_1_BIT|MIPS_SR_EXL|MIPS_SR_KSU_MASK))
 	addiu	t0, %lo(~(MIPS_SR_COP_1_BIT|MIPS_SR_EXL|MIPS_SR_KSU_MASK))
 	and	t0, a1
 #endif
-	mtc0	t0, MIPS_COP_0_STATUS		# re-enable interrupts
+	mtc0	t0, MIPS_COP_0_STATUS
 	COP0_SYNC
 /*
  * Call the system call handler.
@@ -2088,14 +2087,14 @@ END(MIPSX(tlb_set_asid))
  */
 LEAF(MIPSX(tlb_update_addr))
 #ifdef MIPSNNR2
-	di	ta0			# Disable interrupts
+	di	ta0				# Disable interrupts
 #else
-	mfc0	ta0, MIPS_COP_0_STATUS	# Save the status register.
-	mtc0	zero, MIPS_COP_0_STATUS	# Disable interrupts
+	mfc0	ta0, MIPS_COP_0_STATUS		# Save the status register.
+	mtc0	zero, MIPS_COP_0_STATUS		# Disable interrupts
 #endif
 	COP0_SYNC
 #if (PGSHIFT & 1) == 0
-	and	t1, a0, MIPS3_PG_ODDPG	# t1 = Even/Odd flag
+	and	t1, a0, MIPS3_PG_ODDPG		# t1 = Even/Odd flag
 #endif
 	and	a1, a1, MIPS3_PG_ASID
 #ifdef MIPSNNR2
@@ -2162,12 +2161,12 @@ LEAF(MIPSX(tlb_update_addr))
 	 li	v0, 0				# assume failure
 	bnez	t1, 4f				# Decide even odd
 	 nop
-	move	t3, a2				# swap a1 & t0
-	move	a2, t0				#
-	move	t0, a3				#
+	move	t3, a1				# swap a1 and t0
+	move	a1, t0				#
+	move	t0, t3				#
 4:
 	_MTC0	t0, MIPS_COP_0_TLB_LO0		# init low reg0.
-	_MTC0	a2, MIPS_COP_0_TLB_LO1		# init low reg1.
+	_MTC0	a1, MIPS_COP_0_TLB_LO1		# init low reg1.
 #endif /* PGSHIFT & 1 */
 5:
 	COP0_SYNC
@@ -2289,6 +2288,7 @@ LEAF_NOPROFILE(MIPSX(tlb_invalidate_addr))
 	tlbp					# probe the entry in question
 	COP0_SYNC
 	mfc0	v0, MIPS_COP_0_TLB_INDEX	# see what we got
+	MFC0_HAZARD
 	bltz	v0, 2f				# index < 0 then skip
 	 li	t2, MIPS_KSEG0_START		# invalid address
 	PTR_SLL	v0, PGSHIFT | 1			# PAGE_SHIFT | 1
@@ -2305,20 +2305,23 @@ LEAF_NOPROFILE(MIPSX(tlb_invalidate_addr))
 #endif
 	and	a2, t0				# a2=valid entryLo0 afterwards
 	and	a3, t1				# a3=valid entryLo1 afterwards
-	or	v0, a2, a3			# will one be value?
-#ifdef MIPSNN
+	or	v0, a2, a3			# will one be valid?
+#ifdef MIPSNNX
+#error Global bit is lost here when V==0 and it needs to be preserved
 	movz	t0, zero, a2			# zero lo0 if V would not be set
 	movz	t1, zero, a3			# zero lo1 if V would not be set
 	movn	t2, a0, v0			# yes, keep VA the same
 #else
-	beqz	v0, 1f				# no valid entry
-	 _SLL	a2, a2, PG_V_LSHIFT		# move V to MSB
+	_SLL	a2, a2, PG_V_LSHIFT		# move V to MSB
 	_SRA	a2, a2, PG_V_RSHIFT		# fill with MSB
+	or	a2, MIPS3_PG_G			# mask needs to preserve G
 	and	t0, t0, a2			# zero lo0 if V would not be set
 	_SLL	a3, a3, PG_V_LSHIFT		# move V to MSB
 	_SRA	a3, a3, PG_V_RSHIFT		# fill with MSB
-	and	t1, t1, a3			# zero lo1 if V would not be set
-	move	t2, a0				# we need entryHi to be value
+	or	a3, MIPS3_PG_G			# mask needs to preserve G
+	beqz	v0, 1f				# no valid entry
+	 and	t1, t1, a3			# zero lo1 if V would not be set
+	move	t2, a0				# we need entryHi to be valid
 1:
 #endif /* MIPSNN */
 #endif /* (PGSHIFT & 1) == 0 */
@@ -2694,7 +2697,7 @@ MIPSX(user_intr_return):
 	REG_L	t9, CALLFRAME_SIZ+TF_REG_T9(k1)		# $25
 	REG_L	k0, CALLFRAME_SIZ+TF_REG_SR(k1)		# status register
 	DYNAMIC_STATUS_MASK(k0, sp)		# machine dependent masking
-	REG_L	gp, CALLFRAME_SIZ+TF_REG_GP(k1)		# $29
+	REG_L	gp, CALLFRAME_SIZ+TF_REG_GP(k1)		# $28
 	REG_L	sp, CALLFRAME_SIZ+TF_REG_SP(k1)		# $29
 	REG_L	ra, CALLFRAME_SIZ+TF_REG_RA(k1)		# $31
 	mtc0	k0, MIPS_COP_0_STATUS
@@ -2709,22 +2712,35 @@ END(MIPSX(lwp_trampoline))
  * Wiredown the USPACE of newproc in TLB entry#0.  Check whether target
  * USPACE is already in another place of TLB before that, and make
  * sure TBIS(it) in the case.
+ *
+ * Disable the optimisation for PGSHIFT == 14 (aka ENABLE_MIPS_16KB_PAGE)
+ * as the code needs fixing for this case
+ *
+ * _LP64 with UPAGES == 1 is always direct mappable; everything else can have
+ * non-direct mappable USPACE.
  */
+
 LEAF_NOPROFILE(MIPSX(cpu_switch_resume))
-#if !defined(ENABLE_MIPS_16KB_PAGE) && !defined(ENABLE_MIPS_8KB_PAGE)
+#if (PGSHIFT < 14)
+#if (USPACE > PAGE_SIZE) || !defined(_LP64)
 	INT_L	a1, L_MD_UPTE_0(a0)		# a1 = upte[0]
 #if (PGSHIFT & 1)
+#if (USPACE > PAGE_SIZE)
+#error Unsupported
+#else
+	/* even/odd are contiguaous */
 	INT_ADD a2, a1, MIPS3_PG_NEXT		# a2 = upper half
+#endif
 #else
 	INT_L	a2, L_MD_UPTE_1(a0)		# a2 = upte[1]
-#endif
+#endif /* (PGSHIFT & 1) */
 	PTR_L	v0, L_PCB(a0)			# va = l->l_addr
 #if VM_MIN_KERNEL_ADDRESS == MIPS_KSEG2_START
 	li	t0, VM_MIN_KERNEL_ADDRESS	# compute index
 	blt	v0, t0, MIPSX(resume)
 	 nop
 #else
-	li	t0, MIPS_KSEG0_START		# above XKSEG?
+	li	t0, MIPS_KSEG0_START		# below KSEG0?
 	blt	t0, v0, MIPSX(resume)
 	 nop
 	li	t0, VM_MIN_KERNEL_ADDRESS>>32	# below XKSEG?
@@ -2746,14 +2762,12 @@ MIPSX(entry0):
 #endif /* (PGSHIFT & 1) == 0 */
 	_MFC0	ta1, MIPS_COP_0_TLB_HI		# save TLB_HI
 	_MTC0	v0, MIPS_COP_0_TLB_HI		# VPN = va
-#if (PGSHIFT & 1) == 0
+
 	COP0_SYNC
 	tlbp					# probe VPN
 	COP0_SYNC
 	mfc0	t0, MIPS_COP_0_TLB_INDEX
-#ifdef MIPS3
-	nop
-#endif
+	MFC0_HAZARD
 	bltz	t0, MIPSX(entry0set)
 	 sll	t0, t0, PGSHIFT | 1		# PAGE_SHIFT | 1
 	PTR_LA	t0, MIPS_KSEG0_START(t0)
@@ -2766,7 +2780,7 @@ MIPSX(entry0):
 	_MTC0	v0, MIPS_COP_0_TLB_HI		# set VPN again
 	COP0_SYNC
 MIPSX(entry0set):
-#endif /* (PGSHIFT & 1) == 0 */
+
 #ifdef MULTIPROCESSOR
 	PTR_L	t0, L_CPU(a0)			# get cpu_info
 	INT_L	t1, CPU_INFO_KSP_TLB_SLOT(t0)	# get TLB# for KSP
@@ -2783,7 +2797,8 @@ MIPSX(entry0set):
 	_MTC0	ta1, MIPS_COP_0_TLB_HI		# restore TLB_HI
 	COP0_SYNC
 MIPSX(resume):
-#endif /* !ENABLE_MIPS_16KB_PAGE */
+#endif /* (USPACE > PAGE_SIZE) || !defined(_LP64) */
+#endif /* PGSHIFT < 14 */
 #ifdef MIPSNNR2
 	PTR_L	v0, L_PRIVATE(a0)		# get lwp private
 	_MTC0	v0, MIPS_COP_0_USERLOCAL	# make available for rdhwr

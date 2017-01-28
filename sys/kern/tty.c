@@ -1,4 +1,4 @@
-/*	$NetBSD: tty.c,v 1.271 2016/07/07 06:55:43 msaitoh Exp $	*/
+/*	$NetBSD: tty.c,v 1.274 2016/10/01 04:42:54 christos Exp $	*/
 
 /*-
  * Copyright (c) 2008 The NetBSD Foundation, Inc.
@@ -63,7 +63,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: tty.c,v 1.271 2016/07/07 06:55:43 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: tty.c,v 1.274 2016/10/01 04:42:54 christos Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_compat_netbsd.h"
@@ -1240,12 +1240,14 @@ ttioctl(struct tty *tp, u_long cmd, void *data, int flag, struct lwp *l)
 		mutex_spin_exit(&tty_lock);
 		break;
 	case TIOCSTI:			/* simulate terminal input */
-		if (kauth_authorize_device_tty(l->l_cred, KAUTH_DEVICE_TTY_STI,
-		    tp) != 0) {
+		if ((error = kauth_authorize_device_tty(l->l_cred,
+		    KAUTH_DEVICE_TTY_STI, tp)) != 0) {
 			if (!ISSET(flag, FREAD))
-				return (EPERM);
+				return EPERM;
 			if (!isctty(p, tp))
-				return (EACCES);
+				return EACCES;
+			if (tp->t_session->s_leader->p_cred != p->p_cred)
+				return error;
 		}
 		(*tp->t_linesw->l_rint)(*(u_char *)data, tp);
 		break;

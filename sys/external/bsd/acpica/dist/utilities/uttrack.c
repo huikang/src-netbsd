@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2016, Intel Corp.
+ * Copyright (C) 2000 - 2017, Intel Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -107,15 +107,13 @@ AcpiUtCreateList (
     ACPI_MEMORY_LIST        *Cache;
 
 
-    Cache = AcpiOsAllocate (sizeof (ACPI_MEMORY_LIST));
+    Cache = AcpiOsAllocateZeroed (sizeof (ACPI_MEMORY_LIST));
     if (!Cache)
     {
         return (AE_NO_MEMORY);
     }
 
-    memset (Cache, 0, sizeof (ACPI_MEMORY_LIST));
-
-    Cache->ListName = __UNCONST(ListName);
+    Cache->ListName = ListName;
     Cache->ObjectSize = ObjectSize;
 
     *ReturnCache = Cache;

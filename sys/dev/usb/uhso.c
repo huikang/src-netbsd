@@ -1,4 +1,4 @@
-/*	$NetBSD: uhso.c,v 1.22 2016/07/07 06:55:42 msaitoh Exp $	*/
+/*	$NetBSD: uhso.c,v 1.25 2017/01/11 22:09:38 maya Exp $	*/
 
 /*-
  * Copyright (c) 2009 Iain Hibbert
@@ -37,10 +37,11 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: uhso.c,v 1.22 2016/07/07 06:55:42 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: uhso.c,v 1.25 2017/01/11 22:09:38 maya Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_inet.h"
+#include "opt_usb.h"
 #endif
 
 #include <sys/param.h>
@@ -640,14 +641,14 @@ uhso_get_iface_spec(struct usb_attach_arg *uaa, uint8_t ifnum, uint8_t *spec)
 
 	switch (hd->type) {
 	case UHSOTYPE_DEFAULT:
-		if (ifnum > __arraycount(uhso_spec_default))
+		if (ifnum >= __arraycount(uhso_spec_default))
 			break;
 
 		*spec = uhso_spec_default[ifnum];
 		return 1;
 
 	case UHSOTYPE_ICON321:
-		if (ifnum > __arraycount(uhso_spec_icon321))
+		if (ifnum >= __arraycount(uhso_spec_icon321))
 			break;
 
 		*spec = uhso_spec_icon321[ifnum];
@@ -664,8 +665,8 @@ uhso_get_iface_spec(struct usb_attach_arg *uaa, uint8_t ifnum, uint8_t *spec)
 		if (status != USBD_NORMAL_COMPLETION)
 			break;
 
-		if (ifnum > __arraycount(config)
-		    || config[ifnum] > __arraycount(uhso_spec_config))
+		if (ifnum >= __arraycount(config)
+		    || config[ifnum] >= __arraycount(uhso_spec_config))
 			break;
 
 		*spec = uhso_spec_config[config[ifnum]];
@@ -2164,13 +2165,6 @@ uhso_ifnet_input(struct ifnet *ifp, struct mbuf **mb, uint8_t *cp, size_t cc)
 				*mb = m;
 				break;
 			}
-		} else if (want > got) {
-			aprint_error_ifnet(ifp, "bad IP packet (len=%zd)\n",
-			    want);
-
-			ifp->if_ierrors++;
-			m_freem(m);
-			break;
 		}
 
 		m_set_rcvif(m, ifp);

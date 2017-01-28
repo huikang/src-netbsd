@@ -1,4 +1,4 @@
-/*	$NetBSD: netbsd32_netbsd.c,v 1.200 2016/05/13 16:54:36 christos Exp $	*/
+/*	$NetBSD: netbsd32_netbsd.c,v 1.205 2016/10/19 09:44:01 skrll Exp $	*/
 
 /*
  * Copyright (c) 1998, 2001, 2008 Matthew R. Green
@@ -27,11 +27,12 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: netbsd32_netbsd.c,v 1.200 2016/05/13 16:54:36 christos Exp $");
+__KERNEL_RCSID(0, "$NetBSD: netbsd32_netbsd.c,v 1.205 2016/10/19 09:44:01 skrll Exp $");
 
 #if defined(_KERNEL_OPT)
 #include "opt_ddb.h"
 #include "opt_ntp.h"
+#include "opt_ktrace.h"
 #include "opt_compat_netbsd.h"
 #include "opt_compat_43.h"
 #include "opt_sysv.h"
@@ -162,7 +163,8 @@ struct emul emul_netbsd32 = {
 	.e_vm_default_addr =	netbsd32_vm_default_addr,
 	.e_usertrap =		NULL,
 	.e_ucsize =		sizeof(ucontext32_t),
-	.e_startlwp =		startlwp32
+	.e_startlwp =		startlwp32,
+	.e_ktrpsig =		netbsd32_ktrpsig
 };
 
 /*
@@ -401,25 +403,6 @@ netbsd32_setuid(struct lwp *l, const struct netbsd32_setuid_args *uap, register_
 
 	NETBSD32TO64_UAP(uid);
 	return (sys_setuid(l, &ua, retval));
-}
-
-int
-netbsd32_ptrace(struct lwp *l, const struct netbsd32_ptrace_args *uap, register_t *retval)
-{
-	/* {
-		syscallarg(int) req;
-		syscallarg(pid_t) pid;
-		syscallarg(netbsd32_voidp) addr;
-		syscallarg(int) data;
-	} */
-	struct sys_ptrace_args ua;
-
-	NETBSD32TO64_UAP(req);
-	NETBSD32TO64_UAP(pid);
-	NETBSD32TOP_UAP(addr, void *);
-	NETBSD32TO64_UAP(data);
-
-	return (*sysent[SYS_ptrace].sy_call)(l, &ua, retval);
 }
 
 int
@@ -921,7 +904,7 @@ netbsd32___socket30(struct lwp *l, const struct netbsd32___socket30_args *uap, r
 	NETBSD32TO64_UAP(domain);
 	NETBSD32TO64_UAP(type);
 	NETBSD32TO64_UAP(protocol);
-	return (sys___socket30(l, &ua, retval));	
+	return (sys___socket30(l, &ua, retval));
 }
 
 int
@@ -1457,7 +1440,7 @@ fixlimit(int which, struct rlimit *alim)
 			alim->rlim_cur = MAXDSIZ32;
 		if (LIMITCHECK(alim->rlim_max, MAXDSIZ32))
 			alim->rlim_max = MAXDSIZ32;
-		return;	
+		return;
 	case RLIMIT_STACK:
 		if (LIMITCHECK(alim->rlim_cur, MAXSSIZ32))
 			alim->rlim_cur = MAXSSIZ32;
@@ -1826,7 +1809,7 @@ netbsd32_swapctl(struct lwp *l, const struct netbsd32_swapctl_args *uap, registe
 	/* SWAP_STATS50 and SWAP_STATS13 structures need no translation */
 	if (SCARG(&ua, cmd) == SWAP_STATS)
 		return netbsd32_swapctl_stats(l, &ua, retval);
-	
+
 	return (sys_swapctl(l, &ua, retval));
 }
 
@@ -2711,6 +2694,20 @@ netbsd32__sched_getaffinity(struct lwp *l,
 	NETBSD32TOX_UAP(size, size_t);
 	NETBSD32TOP_UAP(cpuset, cpuset_t *);
 	return sys__sched_getaffinity(l, &ua, retval);
+}
+
+int
+netbsd32__sched_protect(struct lwp *l,
+			const struct netbsd32__sched_protect_args *uap,
+			register_t *retval)
+{
+	/* {
+		syscallarg(int) priority;
+	} */
+	struct sys__sched_protect_args ua;
+
+	NETBSD32TO64_UAP(priority);
+	return sys__sched_protect(l, &ua, retval);
 }
 
 int

@@ -1,4 +1,4 @@
-/*	$NetBSD: vm_machdep.c,v 1.147 2016/07/14 04:49:55 skrll Exp $	*/
+/*	$NetBSD: vm_machdep.c,v 1.153 2016/08/09 16:38:24 skrll Exp $	*/
 
 /*
  * Copyright (c) 1988 University of Utah.
@@ -39,7 +39,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: vm_machdep.c,v 1.147 2016/07/14 04:49:55 skrll Exp $");
+__KERNEL_RCSID(0, "$NetBSD: vm_machdep.c,v 1.153 2016/08/09 16:38:24 skrll Exp $");
 
 #include "opt_ddb.h"
 #include "opt_coredump.h"
@@ -116,8 +116,12 @@ cpu_lwp_fork(struct lwp *l1, struct lwp *l2, void *stack, size_t stacksize,
 
 	l2->l_md.md_utf = tf;
 #if (USPACE > PAGE_SIZE) || !defined(_LP64)
+	CTASSERT(__arraycount(l2->l_md.md_upte) >= UPAGES);
+	for (u_int i = 0; i < __arraycount(l2->l_md.md_upte); i++) {
+		l2->l_md.md_upte[i] = 0;
+	}
 	if (!pmap_md_direct_mapped_vaddr_p(ua2)) {
-		__CTASSERT((PGSHIFT & 1) || UPAGES % 2 == 0);
+		CTASSERT((PGSHIFT == 12) == (UPAGES == 2));
 		pt_entry_t * const pte = pmap_pte_lookup(pmap_kernel(), ua2);
 		const uint32_t x = MIPS_HAS_R4K_MMU
 		    ? (MIPS3_PG_RO | MIPS3_PG_WIRED)
@@ -128,6 +132,8 @@ cpu_lwp_fork(struct lwp *l1, struct lwp *l2, void *stack, size_t stacksize,
 			l2->l_md.md_upte[i] = pte[i] & ~x;
 		}
 	}
+#else
+	KASSERT(pmap_md_direct_mapped_vaddr_p(ua2));
 #endif
 	/*
 	 * Rig kernel stack so that it would start out in lwp_trampoline()
@@ -143,7 +149,8 @@ cpu_lwp_fork(struct lwp *l1, struct lwp *l2, void *stack, size_t stacksize,
 	pcb2->pcb_context.val[_L_SP] = (intptr_t)tf;			/* SP */
 	pcb2->pcb_context.val[_L_RA] =
 	   mips_locore_jumpvec.ljv_lwp_trampoline;			/* RA */
-#ifdef _LP64
+#if defined(_LP64) || defined(__mips_n32)
+	KASSERT(tf->tf_regs[_R_SR] & MIPS_SR_KX);
 	KASSERT(pcb2->pcb_context.val[_L_SR] & MIPS_SR_KX);
 #endif
 	KASSERTMSG(pcb2->pcb_context.val[_L_SR] & MIPS_SR_INT_IE,
@@ -236,7 +243,7 @@ cpu_uarea_free(void *va)
 
 #ifdef MIPS3_PLUS
 	if (MIPS_CACHE_VIRTUAL_ALIAS)
-		mips_dcache_inv_range((vaddr_t)va, USPACE);
+		mips_dcache_inv_range((intptr_t)va, USPACE);
 #endif
 
 	for (const paddr_t epa = pa + USPACE; pa < epa; pa += PAGE_SIZE) {

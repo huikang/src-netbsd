@@ -1,4 +1,4 @@
-/*	$NetBSD: userret.h,v 1.11 2008/04/28 20:23:24 martin Exp $	*/
+/*	$NetBSD: userret.h,v 1.13 2017/01/16 21:19:14 kamil Exp $	*/
 
 /*-
  * Copyright (c) 1998, 2000 The NetBSD Foundation, Inc.
@@ -63,6 +63,7 @@
  */
 
 #include <sys/userret.h>
+#include <x86/dbregs.h>
 
 static __inline void userret(struct lwp *);
 
@@ -76,4 +77,12 @@ userret(struct lwp *l)
 
 	/* Invoke MI userret code */
 	mi_userret(l);
+
+	/*
+	 * Allow to mix debug registers with single step.
+	 */
+	if (l->l_md.md_flags & MDL_X86_HW_WATCHPOINTS)
+		set_x86_hw_watchpoints(l);
+	else
+		clear_x86_hw_watchpoints();
 }

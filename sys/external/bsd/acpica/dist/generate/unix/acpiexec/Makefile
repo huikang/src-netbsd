@@ -163,7 +163,7 @@ OBJECTS = \
 	$(OBJDIR)/nsxfeval.o\
 	$(OBJDIR)/nsxfname.o\
 	$(OBJDIR)/nsxfobj.o\
-	$(OBJDIR)/oslibcfs.o\
+	$(OBJDIR)/osgendbg.o\
 	$(OBJDIR)/osunixxf.o\
 	$(OBJDIR)/psargs.o\
 	$(OBJDIR)/psloop.o\
@@ -224,10 +224,10 @@ OBJECTS = \
 	$(OBJDIR)/utownerid.o\
 	$(OBJDIR)/utnonansi.o\
 	$(OBJDIR)/utpredef.o\
-	$(OBJDIR)/utprint.o\
 	$(OBJDIR)/utresrc.o\
 	$(OBJDIR)/utstate.o\
 	$(OBJDIR)/utstring.o\
+	$(OBJDIR)/utstrtoul64.o\
 	$(OBJDIR)/uttrack.o\
 	$(OBJDIR)/utuuid.o\
 	$(OBJDIR)/utxface.o\

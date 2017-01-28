@@ -1,4 +1,4 @@
-/*	$NetBSD: trap.c,v 1.276 2015/12/16 18:54:03 maxv Exp $	*/
+/*	$NetBSD: trap.c,v 1.282 2017/01/18 05:11:59 kamil Exp $	*/
 
 /*-
  * Copyright (c) 1998, 2000, 2005, 2006, 2007, 2008 The NetBSD Foundation, Inc.
@@ -68,14 +68,13 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: trap.c,v 1.276 2015/12/16 18:54:03 maxv Exp $");
+__KERNEL_RCSID(0, "$NetBSD: trap.c,v 1.282 2017/01/18 05:11:59 kamil Exp $");
 
 #include "opt_ddb.h"
 #include "opt_kgdb.h"
 #include "opt_lockdebug.h"
 #include "opt_multiprocessor.h"
 #include "opt_vm86.h"
-#include "opt_kstack_dr0.h"
 #include "opt_xen.h"
 #include "opt_dtrace.h"
 
@@ -116,7 +115,7 @@ __KERNEL_RCSID(0, "$NetBSD: trap.c,v 1.276 2015/12/16 18:54:03 maxv Exp $");
 #include <sys/dtrace_bsd.h>
 
 /*
- * This is a hook which is initialised by the dtrace module
+ * This is a hook which is initialized by the dtrace module
  * to handle traps which might occur during DTrace probe
  * execution.
  */
@@ -233,24 +232,6 @@ trap_print(const struct trapframe *frame, const lwp_t *l)
 	    l, l->l_proc->p_pid, l->l_lid, KSTACK_LOWEST_ADDR(l));
 }
 
-static void
-check_dr0(void)
-{
-#ifdef KSTACK_CHECK_DR0
-	u_int mask, dr6 = rdr6();
-
-	mask = 1 << 0; /* dr0 */
-	if (dr6 & mask) {
-		panic("trap on DR0: maybe kernel stack overflow\n");
-#if 0
-		dr6 &= ~mask;
-		ldr6(dr6);
-		return;
-#endif
-	}
-#endif
-}
-
 /*
  * trap(frame): exception, fault, and trap interface to BSD kernel.
  *
@@ -270,7 +251,7 @@ trap(struct trapframe *frame)
 	struct trapframe *vframe;
 	ksiginfo_t ksi;
 	void *onfault;
-	int type, error;
+	int type, error, wptnfo;
 	uint32_t cr2;
 	bool pfail;
 
@@ -291,8 +272,7 @@ trap(struct trapframe *frame)
 		trap_print(frame, l);
 	}
 #endif
-	if (type != T_NMI &&
-	    !KERNELMODE(frame->tf_cs, frame->tf_eflags)) {
+	if (type != T_NMI && !KERNELMODE(frame->tf_cs, frame->tf_eflags)) {
 		type |= T_USER;
 		l->l_md.md_regs = frame;
 		pcb->pcb_cr2 = 0;
@@ -322,14 +302,9 @@ trap(struct trapframe *frame)
 
 	switch (type) {
 
-	case T_ASTFLT:
-		/*FALLTHROUGH*/
-
 	default:
 	we_re_toast:
-		if (type == T_TRCTRAP)
-			check_dr0();
-		else
+		if (type != T_TRCTRAP)
 			trap_print(frame, l);
 
 		if (kdb_trap(type, 0, frame))
@@ -409,7 +384,7 @@ kernelfault:
 				goto we_re_toast;
 			}
 			/*
-			 * We faulted loading one if the user segment registers.
+			 * We faulted loading one of the user segment registers.
 			 * The stack frame containing the user registers is
 			 * still valid and is just below the %eip:%cs:%fl of
 			 * the kernel fault frame.
@@ -586,7 +561,7 @@ faultcommon:
 		 * The last can occur during an exec() copyin where the
 		 * argument space is lazy-allocated.
 		 */
-		if (type == T_PAGEFLT && va >= KERNBASE)
+		if (type == T_PAGEFLT && va >= VM_MIN_KERNEL_ADDRESS)
 			map = kernel_map;
 		else
 			map = &vm->vm_map;
@@ -725,7 +700,11 @@ faultcommon:
 			KSI_INIT_TRAP(&ksi);
 			ksi.ksi_signo = SIGTRAP;
 			ksi.ksi_trap = type & ~T_USER;
-			if (type == (T_BPTFLT|T_USER))
+			if ((wptnfo = user_trap_x86_hw_watchpoint())) {
+				ksi.ksi_code = TRAP_HWWPT;
+				ksi.ksi_trap2 = x86_hw_watchpoint_reg(wptnfo);
+				ksi.ksi_trap3 = x86_hw_watchpoint_type(wptnfo);
+			} else if (type == (T_BPTFLT|T_USER))
 				ksi.ksi_code = TRAP_BRKPT;
 			else
 				ksi.ksi_code = TRAP_TRACE;

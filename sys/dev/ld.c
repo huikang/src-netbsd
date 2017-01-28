@@ -1,4 +1,4 @@
-/*	$NetBSD: ld.c,v 1.94 2016/02/27 08:54:49 mlelstv Exp $	*/
+/*	$NetBSD: ld.c,v 1.99 2016/11/26 12:32:03 mlelstv Exp $	*/
 
 /*-
  * Copyright (c) 1998, 2000 The NetBSD Foundation, Inc.
@@ -34,7 +34,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ld.c,v 1.94 2016/02/27 08:54:49 mlelstv Exp $");
+__KERNEL_RCSID(0, "$NetBSD: ld.c,v 1.99 2016/11/26 12:32:03 mlelstv Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -54,10 +54,10 @@ __KERNEL_RCSID(0, "$NetBSD: ld.c,v 1.94 2016/02/27 08:54:49 mlelstv Exp $");
 #include <sys/vnode.h>
 #include <sys/syslog.h>
 #include <sys/mutex.h>
+#include <sys/module.h>
+#include <sys/reboot.h>
 
 #include <dev/ldvar.h>
-
-#include <prop/proplib.h>
 
 static void	ldminphys(struct buf *bp);
 static bool	ld_suspend(device_t, const pmf_qual_t *);
@@ -122,7 +122,7 @@ static struct	dkdriver lddkdriver = {
 };
 
 void
-ldattach(struct ld_softc *sc)
+ldattach(struct ld_softc *sc, const char *default_strategy)
 {
 	device_t self = sc->sc_dv;
 	struct dk_softc *dksc = &sc->sc_dksc;
@@ -153,7 +153,7 @@ ldattach(struct ld_softc *sc)
 	disk_attach(&dksc->sc_dkdev);
 	ld_set_geometry(sc);
 
-	bufq_alloc(&dksc->sc_bufq, BUFQ_DISK_DEFAULT_STRAT, BUFQ_SORT_RAWBLOCK);
+	bufq_alloc(&dksc->sc_bufq, default_strategy, BUFQ_SORT_RAWBLOCK);
 
 	/* Register with PMF */
 	if (!pmf_device_register1(dksc->sc_dev, ld_suspend, NULL, ld_shutdown))
@@ -275,7 +275,8 @@ ld_shutdown(device_t dev, int flags)
 	struct ld_softc *sc = device_private(dev);
 	struct dk_softc *dksc = &sc->sc_dksc;
 
-	if (sc->sc_flush != NULL && (*sc->sc_flush)(sc, LDFL_POLL) != 0) {
+	if ((flags & RB_NOSYNC) == 0 && sc->sc_flush != NULL
+	    && (*sc->sc_flush)(sc, LDFL_POLL) != 0) {
 		device_printf(dksc->sc_dev, "unable to flush cache\n");
 		return false;
 	}
@@ -353,10 +354,6 @@ ldioctl(dev_t dev, u_long cmd, void *addr, int32_t flag, struct lwp *l)
 	sc = device_lookup_private(&ld_cd, unit);
 	dksc = &sc->sc_dksc;
 
-	error = dk_ioctl(dksc, dev, cmd, addr, flag, l);
-	if (error != EPASSTHROUGH)
-		return (error);
-
 	error = 0;
 
 	switch (cmd) {
@@ -372,8 +369,9 @@ ldioctl(dev_t dev, u_long cmd, void *addr, int32_t flag, struct lwp *l)
 		else
 			error = 0;	/* XXX Error out instead? */
 		break;
+
 	default:
-		error = ENOTTY;
+		error = dk_ioctl(dksc, dev, cmd, addr, flag, l);
 		break;
 	}
 
@@ -446,11 +444,11 @@ ldsize(dev_t dev)
 
 	unit = DISKUNIT(dev);
 	if ((sc = device_lookup_private(&ld_cd, unit)) == NULL)
-		return (ENODEV);
+		return (-1);
 	dksc = &sc->sc_dksc;
 
 	if ((sc->sc_flags & LDF_ENABLED) == 0)
-		return (ENODEV);
+		return (-1);
 
 	return dk_size(dksc, dev);
 }
@@ -592,4 +590,43 @@ lddiscard(dev_t dev, off_t pos, off_t len)
 	dksc = &sc->sc_dksc;
 
 	return dk_discard(dksc, dev, pos, len);
+}
+
+MODULE(MODULE_CLASS_DRIVER, ld, "dk_subr");
+
+#ifdef _MODULE
+CFDRIVER_DECL(ld, DV_DISK, NULL);
+#endif
+
+static int
+ld_modcmd(modcmd_t cmd, void *opaque)
+{
+#ifdef _MODULE
+	devmajor_t bmajor, cmajor;
+#endif
+	int error = 0;
+
+#ifdef _MODULE
+	switch (cmd) {
+	case MODULE_CMD_INIT:
+		bmajor = cmajor = -1;
+		error = devsw_attach(ld_cd.cd_name, &ld_bdevsw, &bmajor,
+		    &ld_cdevsw, &cmajor);
+		if (error)
+			break;
+		error = config_cfdriver_attach(&ld_cd);
+		break;
+	case MODULE_CMD_FINI:
+		error = config_cfdriver_detach(&ld_cd);
+		if (error)
+			break;
+		devsw_detach(&ld_bdevsw, &ld_cdevsw);
+		break;
+	default:
+		error = ENOTTY;
+		break;
+	}
+#endif
+
+	return error;
 }
