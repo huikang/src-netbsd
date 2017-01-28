@@ -1,4 +1,4 @@
-/*	$NetBSD: kern_exec.c,v 1.435 2016/07/07 06:55:43 msaitoh Exp $	*/
+/*	$NetBSD: kern_exec.c,v 1.441 2017/01/25 17:57:14 christos Exp $	*/
 
 /*-
  * Copyright (c) 2008 The NetBSD Foundation, Inc.
@@ -59,7 +59,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: kern_exec.c,v 1.435 2016/07/07 06:55:43 msaitoh Exp $");
+__KERNEL_RCSID(0, "$NetBSD: kern_exec.c,v 1.441 2017/01/25 17:57:14 christos Exp $");
 
 #include "opt_exec.h"
 #include "opt_execfmt.h"
@@ -121,6 +121,8 @@ __KERNEL_RCSID(0, "$NetBSD: kern_exec.c,v 1.435 2016/07/07 06:55:43 msaitoh Exp 
 #endif
 
 struct execve_data;
+
+extern int user_va0_disable;
 
 static size_t calcargs(struct execve_data * restrict, const size_t);
 static size_t calcstack(struct execve_data * restrict, const size_t);
@@ -401,11 +403,10 @@ check_exec(struct lwp *l, struct exec_package *epp, struct pathbuf *pb)
 	/*
 	 * Set up default address space limits.  Can be overridden
 	 * by individual exec packages.
-	 *
-	 * XXX probably should be all done in the exec packages.
 	 */
-	epp->ep_vm_minaddr = VM_MIN_ADDRESS;
+	epp->ep_vm_minaddr = exec_vm_minaddr(VM_MIN_ADDRESS);
 	epp->ep_vm_maxaddr = VM_MAXUSER_ADDRESS;
+
 	/*
 	 * set up the vmcmds for creation of the process
 	 * address space
@@ -650,6 +651,19 @@ makepathbuf(struct lwp *l, const char *upath, struct pathbuf **pbp,
 out:
 	*pbp = pathbuf_assimilate(path);
 	return 0;
+}
+
+vaddr_t
+exec_vm_minaddr(vaddr_t va_min)
+{
+	/*
+	 * Increase va_min if we don't want NULL to be mappable by the
+	 * process.
+	 */
+#define VM_MIN_GUARD	PAGE_SIZE
+	if (user_va0_disable && (va_min < VM_MIN_GUARD))
+		return VM_MIN_GUARD;
+	return va_min;
 }
 
 static int
@@ -1199,7 +1213,7 @@ execve_runproc(struct lwp *l, struct execve_data * restrict data,
 	if (__predict_false(ktrace_on))
 		fd_ktrexecfd();
 
-	execsigs(p);		/* reset catched signals */
+	execsigs(p);		/* reset caught signals */
 
 	mutex_enter(p->p_lock);
 	l->l_ctxlink = NULL;	/* reset ucontext link */
@@ -1221,26 +1235,11 @@ execve_runproc(struct lwp *l, struct execve_data * restrict data,
 	 * exited and exec()/exit() are the only places it will be cleared.
 	 */
 	if ((p->p_lflag & PL_PPWAIT) != 0) {
-#if 0
-		lwp_t *lp;
-
-		mutex_enter(proc_lock);
-		lp = p->p_vforklwp;
-		p->p_vforklwp = NULL;
-
-		l->l_lwpctl = NULL; /* was on loan from blocked parent */
-		p->p_lflag &= ~PL_PPWAIT;
-
-		lp->l_pflag &= ~LP_VFORKWAIT; /* XXX */
-		cv_broadcast(&lp->l_waitcv);
-		mutex_exit(proc_lock);
-#else
 		mutex_enter(proc_lock);
 		l->l_lwpctl = NULL; /* was on loan from blocked parent */
 		p->p_lflag &= ~PL_PPWAIT;
 		cv_broadcast(&p->p_pptr->p_waitcv);
 		mutex_exit(proc_lock);
-#endif
 	}
 
 	error = credexec(l, &data->ed_attr);
@@ -1304,6 +1303,7 @@ execve_runproc(struct lwp *l, struct execve_data * restrict data,
 
 		KSI_INIT_EMPTY(&ksi);
 		ksi.ksi_signo = SIGTRAP;
+		ksi.ksi_code = TRAP_EXEC;
 		ksi.ksi_lid = l->l_lid;
 		kpsignal(p, &ksi, NULL);
 	}
@@ -1411,10 +1411,11 @@ calcargs(struct execve_data * restrict data, const size_t argenvstrlen)
 	    data->ed_argc +		/* char *argv[] */
 	    1 +				/* \0 */
 	    data->ed_envc +		/* char *env[] */
-	    1 +				/* \0 */
-	    epp->ep_esch->es_arglen;	/* auxinfo */
+	    1;				/* \0 */
 
-	return (nargenvptrs * ptrsz(epp)) + argenvstrlen;
+	return (nargenvptrs * ptrsz(epp))	/* pointers */
+	    + argenvstrlen			/* strings */
+	    + epp->ep_esch->es_arglen;		/* auxinfo */
 }
 
 static size_t
@@ -1665,9 +1666,8 @@ copyargs(struct lwp *l, struct exec_package *pack, struct ps_strings *arginfo,
 	    argc +			/* char *argv[] */
 	    1 +				/* \0 */
 	    envc +			/* char *env[] */
-	    1 +				/* \0 */
-	    /* XXX auxinfo multiplied by ptr size? */
-	    pack->ep_esch->es_arglen);	/* auxinfo */
+	    1) +			/* \0 */
+	    pack->ep_esch->es_arglen;	/* auxinfo */
 	sp = argp;
 
 	if ((error = copyout(&argc, cpp++, sizeof(argc))) != 0) {

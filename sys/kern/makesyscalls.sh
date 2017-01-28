@@ -1,4 +1,4 @@
-#	$NetBSD: makesyscalls.sh,v 1.164 2016/01/26 23:46:37 pooka Exp $
+#	$NetBSD: makesyscalls.sh,v 1.168 2017/01/15 17:00:59 christos Exp $
 #
 # Copyright (c) 1994, 1996, 2000 Christopher G. Demetriou
 # All rights reserved.
@@ -470,6 +470,11 @@ syscall != $1 {
 	print
 	exit 1
 }
+function isarg64(type) {
+	gsub("netbsd32_", "", type);
+	return type == "quad_t" || type == "off_t" \
+	    || type == "dev_t" ||  type == "time_t";
+}
 function parserr(was, wanted) {
 	printf "%s: line %d: unexpected %s (expected <%s>)\n", \
 	    infile, NR, was, wanted
@@ -573,7 +578,7 @@ function parseline() {
 	} else {
 		funcname=fprefix "_" fbase
 	}
-	if (returntype == "quad_t" || returntype == "off_t") {
+	if (isarg64(returntype)) {
 		if (sycall_flags == "0")
 			sycall_flags = "SYCALL_RET_64";
 		else
@@ -646,8 +651,7 @@ function parseline() {
 		} else {
 			argalign++;
 		}
-		if (argtype[argc] == "quad_t" || argtype[argc] == "off_t" \
-		  || argtype[argc] == "dev_t" || argtype[argc] == "time_t") {
+		if (isarg64(argtype[argc])) {
 			if (sycall_flags == "0")
 				sycall_flags = "SYCALL_ARG"argc-1"_64";
 			else
@@ -789,7 +793,7 @@ function putsystrace(type, compatwrap_) {
 	printf("\t/* %s */\n\tcase %d:\n", funcname, syscall) > systraceret
 	if (argc > 0) {
 		printf("\t\tswitch(ndx) {\n") > systracetmp
-		printf("\t\tstruct %s%s_args *p = params;\n", compatwrap_, funcname) > systrace
+		printf("\t\tconst struct %s%s_args *p = params;\n", compatwrap_, funcname) > systrace
 		for (i = 1; i <= argc; i++) {
 			arg = argtype[i]
 			sub("__restrict$", "", arg)
@@ -799,7 +803,8 @@ function putsystrace(type, compatwrap_) {
 				printf("\t\tuarg[%d] = (intptr_t) SCARG(p, %s).i32; /* %s */\n", \
 				     i - 1, \
 				     argname[i], arg) > systrace
-			else if (index(arg, "*") > 0 || arg == "caddr_t")
+			else if (index(arg, "*") > 0 || arg == "caddr_t" ||
+			    arg ~ /.*_handler_t$/)
 				printf("\t\tuarg[%d] = (intptr_t) SCARG(p, %s); /* %s */\n", \
 				     i - 1, \
 				     argname[i], arg) > systrace

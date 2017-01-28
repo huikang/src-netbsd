@@ -1,4 +1,4 @@
-/*	$NetBSD: setup.c,v 1.32 2014/12/04 01:41:37 christos Exp $	*/
+/*	$NetBSD: setup.c,v 1.35 2016/08/15 19:13:24 jdolecek Exp $	*/
 
 /*
  * Copyright (c) 1980, 1986, 1993
@@ -58,7 +58,7 @@
 #if 0
 static char sccsid[] = "@(#)setup.c	8.5 (Berkeley) 11/23/94";
 #else
-__RCSID("$NetBSD: setup.c,v 1.32 2014/12/04 01:41:37 christos Exp $");
+__RCSID("$NetBSD: setup.c,v 1.35 2016/08/15 19:13:24 jdolecek Exp $");
 #endif
 #endif /* not lint */
 
@@ -77,6 +77,8 @@ __RCSID("$NetBSD: setup.c,v 1.32 2014/12/04 01:41:37 christos Exp $");
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+
+#include <util.h>
 
 #include "fsck.h"
 #include "extern.h"
@@ -306,7 +308,7 @@ readsb(int listerr)
 	}
 	if (sblock.e2fs.e2fs_rev > E2FS_REV0 &&
 	    (!powerof2(sblock.e2fs.e2fs_inode_size) ||
-	     sblock.e2fs.e2fs_inode_size < sizeof(struct ext2fs_dinode) ||
+	     sblock.e2fs.e2fs_inode_size < EXT2_REV0_DINODE_SIZE ||
 	     sblock.e2fs.e2fs_inode_size >
 	      (1024 << sblock.e2fs.e2fs_log_bsize))) {
 		badsb(listerr, "BAD INODE_SIZE");
@@ -377,14 +379,29 @@ readsb(int listerr)
 	asblk.b_un.b_fs->e2fs_features_rocompat |=
 	    sblk.b_un.b_fs->e2fs_features_rocompat & EXT2F_ROCOMPAT_LARGEFILE;
 	if (sblock.e2fs.e2fs_rev > E2FS_REV0 &&
-	    ((sblock.e2fs.e2fs_features_incompat & ~EXT2F_INCOMPAT_SUPP) ||
-	    (sblock.e2fs.e2fs_features_rocompat & ~EXT2F_ROCOMPAT_SUPP))) {
+	    ((sblock.e2fs.e2fs_features_incompat & ~EXT2F_INCOMPAT_SUPP_FSCK) ||
+	    (sblock.e2fs.e2fs_features_rocompat & ~EXT2F_ROCOMPAT_SUPP_FSCK))) {
 		if (debug) {
 			printf("compat 0x%08x, incompat 0x%08x, compat_ro "
 			    "0x%08x\n",
 			    sblock.e2fs.e2fs_features_compat,
 			    sblock.e2fs.e2fs_features_incompat,
 			    sblock.e2fs.e2fs_features_rocompat);
+
+			if ((sblock.e2fs.e2fs_features_rocompat & ~EXT2F_ROCOMPAT_SUPP_FSCK)) {
+				char buf[512];
+
+				snprintb(buf, sizeof(buf), EXT2F_ROCOMPAT_BITS,
+					sblock.e2fs.e2fs_features_rocompat & ~EXT2F_ROCOMPAT_SUPP_FSCK);
+				printf("unsupported rocompat features: %s\n", buf);
+			}
+			if ((sblock.e2fs.e2fs_features_incompat & ~EXT2F_INCOMPAT_SUPP_FSCK)) {
+				char buf[512];
+
+				snprintb(buf, sizeof(buf), EXT2F_INCOMPAT_BITS,
+					sblock.e2fs.e2fs_features_incompat & ~EXT2F_INCOMPAT_SUPP_FSCK);
+				printf("unsupported incompat features: %s\n", buf);
+			}
 		}
 		badsb(listerr, "INCOMPATIBLE FEATURE BITS IN SUPER BLOCK");
 		return 0;

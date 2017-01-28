@@ -1,4 +1,4 @@
-/*	$NetBSD: fbt.c,v 1.19 2016/07/17 02:09:10 pgoyette Exp $	*/
+/*	$NetBSD: fbt.c,v 1.21 2017/01/07 21:39:52 christos Exp $	*/
 
 /*
  * CDDL HEADER START
@@ -44,7 +44,7 @@
 #include <sys/ksyms.h>
 #include <sys/cpu.h>
 #include <sys/kthread.h>
-#include <sys/limits.h>
+#include <sys/syslimits.h>
 #include <sys/linker.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
@@ -2141,4 +2141,4 @@ fbt_open(dev_t dev, int flags, int mode, struct lwp *l)
 	return (0);
 }
 
-MODULE(MODULE_CLASS_MISC, dtrace_fbt, "dtrace");
+MODULE(MODULE_CLASS_MISC, dtrace_fbt, "dtrace,zlib");

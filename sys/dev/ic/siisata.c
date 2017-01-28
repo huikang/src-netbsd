@@ -1,4 +1,4 @@
-/* $NetBSD: siisata.c,v 1.28 2016/05/02 19:18:29 christos Exp $ */
+/* $NetBSD: siisata.c,v 1.30 2017/01/03 01:30:15 jakllsch Exp $ */
 
 /* from ahcisata_core.c */
 
@@ -79,7 +79,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: siisata.c,v 1.28 2016/05/02 19:18:29 christos Exp $");
+__KERNEL_RCSID(0, "$NetBSD: siisata.c,v 1.30 2017/01/03 01:30:15 jakllsch Exp $");
 
 #include <sys/types.h>
 #include <sys/malloc.h>
@@ -724,11 +724,10 @@ siisata_probe_drive(struct ata_channel *chp)
 		if (timed_out) {
 			aprint_error_dev(sc->sc_atac.atac_dev,
 			    "SOFT_RESET failed on port %d (error %d PSS 0x%x), "
-			    "disabling\n", chp->ch_channel,
+			    "resetting\n", chp->ch_channel,
 			    PRREAD(sc, PRX(chp->ch_channel, PRO_PCE)),
 			    PRREAD(sc, PRX(chp->ch_channel, PRO_PSS)));
-			PRWRITE(sc, PRX(chp->ch_channel, PRO_PCS),
-			    PR_PC_PORT_RESET);
+			siisata_reinit_port(chp);
 			break;
 		}
 
@@ -846,6 +845,11 @@ siisata_cmd_start(struct ata_channel *chp, struct ata_xfer *xfer)
 	prb->prb_fis[rhd_c] |= xfer->c_drive;
 
 	memset(prb->prb_atapi, 0, sizeof(prb->prb_atapi));
+
+	if (ata_c->r_command == ATA_DATA_SET_MANAGEMENT) {
+		prb->prb_control |= htole16(PRB_CF_PROTOCOL_OVERRIDE);
+		prb->prb_protocol_override |= htole16(PRB_PO_WRITE);
+	}
 
 	if (siisata_dma_setup(chp, slot,
 	    (ata_c->flags & (AT_READ | AT_WRITE)) ? ata_c->data : NULL,

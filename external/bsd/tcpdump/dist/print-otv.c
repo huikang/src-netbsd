@@ -13,14 +13,18 @@
  * Original code by Francesco Fondelli (francesco dot fondelli, gmail dot com)
  */
 
-#define NETDISSECT_REWORKED
+#include <sys/cdefs.h>
+#ifndef lint
+__RCSID("$NetBSD: print-otv.c,v 1.2 2017/01/24 23:29:14 christos Exp $");
+#endif
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <tcpdump-stdinc.h>
+#include <netdissect-stdinc.h>
 
-#include "interface.h"
+#include "netdissect.h"
 #include "extract.h"
 
 /*

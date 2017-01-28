@@ -1,4 +1,4 @@
-/*	$NetBSD: param.h,v 1.78 2015/10/27 22:28:56 mrg Exp $	*/
+/*	$NetBSD: param.h,v 1.80 2017/01/20 00:29:28 maya Exp $	*/
 
 /*-
  * Copyright (c) 1990 The Regents of the University of California.
@@ -65,6 +65,8 @@
 #define	PGOFSET		(NBPG-1)	/* byte offset into page */
 #define	NPTEPG		(NBPG/(sizeof (pt_entry_t)))
 
+#define	MAXIOMEM	0xffffffff
+
 #if defined(_KERNEL_OPT)
 #include "opt_kernbase.h"
 #endif /* defined(_KERNEL_OPT) */
@@ -121,7 +123,7 @@
 #define	MCLBYTES	(1 << MCLSHIFT)	/* size of a m_buf cluster */
 
 #ifndef NMBCLUSTERS_MAX
-#define	NMBCLUSTERS_MAX	(0x2000000 / MCLBYTES)	/* Limit to 64MB for clusters */
+#define	NMBCLUSTERS_MAX	(0x4000000 / MCLBYTES)	/* Limit to 64MB for clusters */
 #endif
 
 #ifndef NFS_RSIZE

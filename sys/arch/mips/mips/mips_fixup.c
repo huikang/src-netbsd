@@ -1,4 +1,4 @@
-/*	$NetBSD: mips_fixup.c,v 1.16 2016/07/11 19:17:55 skrll Exp $	*/
+/*	$NetBSD: mips_fixup.c,v 1.19 2016/10/08 08:19:22 skrll Exp $	*/
 
 /*-
  * Copyright (c) 2010 The NetBSD Foundation, Inc.
@@ -30,7 +30,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: mips_fixup.c,v 1.16 2016/07/11 19:17:55 skrll Exp $");
+__KERNEL_RCSID(0, "$NetBSD: mips_fixup.c,v 1.19 2016/10/08 08:19:22 skrll Exp $");
 
 #include "opt_mips3_wired.h"
 #include "opt_multiprocessor.h"
@@ -145,11 +145,19 @@ mips_fixup_exceptions(mips_fixup_callback_t callback, void *arg)
 				}
 				lui_insnp = NULL;
 			}
+		} else if (INSN_LOAD_P(insn)) {
+			/*
+			 * If we are loading the register used in the LUI,
+			 * then that LUI is meaningless now.
+			 */
+			size_t rt = (insn >> 16) & 31;
+			if (lui_reg == rt)
+				lui_insn = 0;
 		}
 	}
 
 	if (fixed)
-		mips_icache_sync_range((vaddr_t)start,
+		mips_icache_sync_range((intptr_t)start,
 		   sizeof(start[0]) * (end - start));
 
 	return fixed;
@@ -483,7 +491,7 @@ mips_fixup_stubs(uint32_t *start, uint32_t *end)
 	if (sizeof(uint32_t [end - start]) > mips_cache_info.mci_picache_size)
 		mips_icache_sync_all();
 	else
-		mips_icache_sync_range((vaddr_t)start,
+		mips_icache_sync_range((intptr_t)start,
 		    sizeof(uint32_t [end - start]));
 
 #ifdef DEBUG
@@ -528,7 +536,7 @@ mips_cpu_switch_resume(struct lwp *l)
 tlb_asid_t
 tlb_get_asid(void)
 {
-	return (*mips_locore_jumpvec.ljv_tlb_get_asid)();  
+	return (*mips_locore_jumpvec.ljv_tlb_get_asid)();
 }
 
 void

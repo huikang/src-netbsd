@@ -1,4 +1,4 @@
-/*	$NetBSD: if_iwi.c,v 1.99 2016/06/10 13:27:14 ozaki-r Exp $  */
+/*	$NetBSD: if_iwi.c,v 1.101 2016/12/08 01:12:01 ozaki-r Exp $  */
 /*	$OpenBSD: if_iwi.c,v 1.111 2010/11/15 19:11:57 damien Exp $	*/
 
 /*-
@@ -19,7 +19,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_iwi.c,v 1.99 2016/06/10 13:27:14 ozaki-r Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_iwi.c,v 1.101 2016/12/08 01:12:01 ozaki-r Exp $");
 
 /*-
  * Intel(R) PRO/Wireless 2200BG/2225BG/2915ABG driver
@@ -355,6 +355,7 @@ iwi_attach(device_t parent, device_t self, void *aux)
 	memcpy(ifp->if_xname, device_xname(self), IFNAMSIZ);
 
 	if_attach(ifp);
+	if_deferred_start_init(ifp, NULL);
 	ieee80211_ifattach(ic);
 	/* override default methods */
 	ic->ic_node_alloc = iwi_node_alloc;
@@ -1284,6 +1285,14 @@ iwi_notification_intr(struct iwi_softc *sc, struct iwi_notif *notif)
 		case IWI_AUTH_FAIL:
 			break;
 
+		case IWI_AUTH_SENT_1:
+		case IWI_AUTH_RECV_2:
+		case IWI_AUTH_SEQ1_PASS:
+			break;
+
+		case IWI_AUTH_SEQ1_FAIL:
+			break;
+
 		default:
 			aprint_error_dev(sc->sc_dev,
 			    "unknown authentication state %u\n", auth->state);
@@ -1436,7 +1445,7 @@ iwi_tx_intr(struct iwi_softc *sc, struct iwi_tx_ring *txq)
 	ifp->if_flags &= ~IFF_OACTIVE;
 
 	/* Call start() since some buffer descriptors have been released */
-	(*ifp->if_start)(ifp);
+	if_schedule_deferred_start(ifp);
 }
 
 static int

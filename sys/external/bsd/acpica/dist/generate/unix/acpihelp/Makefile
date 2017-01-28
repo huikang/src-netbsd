@@ -28,17 +28,19 @@ HEADERS = \
     $(wildcard $(ACPIHELP)/*.h)
 
 OBJECTS = \
+	$(OBJDIR)/ahaml.o\
 	$(OBJDIR)/ahamlops.o\
+	$(OBJDIR)/ahasl.o\
 	$(OBJDIR)/ahaslkey.o\
 	$(OBJDIR)/ahaslops.o\
 	$(OBJDIR)/ahdecode.o\
+	$(OBJDIR)/ahgrammar.o\
 	$(OBJDIR)/ahids.o\
 	$(OBJDIR)/ahpredef.o\
 	$(OBJDIR)/ahmain.o\
 	$(OBJDIR)/ahtable.o\
 	$(OBJDIR)/ahuuids.o\
 	$(OBJDIR)/getopt.o\
-	$(OBJDIR)/oslibcfs.o\
 	$(OBJDIR)/osunixxf.o\
 	$(OBJDIR)/utdebug.o\
 	$(OBJDIR)/utexcep.o\
@@ -47,7 +49,6 @@ OBJECTS = \
 	$(OBJDIR)/utmath.o\
 	$(OBJDIR)/utnonansi.o\
 	$(OBJDIR)/utpredef.o\
-	$(OBJDIR)/utprint.o\
 	$(OBJDIR)/utuuid.o
 
 #

@@ -1,4 +1,4 @@
-/*	$NetBSD: asm.h,v 1.49 2016/07/11 16:15:35 matt Exp $	*/
+/*	$NetBSD: asm.h,v 1.53 2016/11/11 16:41:32 maya Exp $	*/
 
 /*
  * Copyright (c) 1992, 1993
@@ -76,7 +76,7 @@
 	lw	t9,4(sp);					\
 	addiu	sp,sp,8;					\
 	addiu	t9,t9,40;					\
-	.set	pop;					
+	.set	pop;
 
 #ifdef GPROF
 #define	MCOUNT _KERN_MCOUNT
@@ -502,6 +502,19 @@ _C_LABEL(x):
 #define	REG_LL		lld
 #define	REG_SC		scd
 #define	REG_SCALESHIFT	3
+#endif
+
+#if (MIPS1 + MIPS2) > 0
+#define	NOP_L		nop
+#else
+#define	NOP_L		/* nothing */
+#endif
+
+/* CPU dependent hook for cp0 load delays */
+#if defined(MIPS1) || defined(MIPS2) || defined(MIPS3)
+#define MFC0_HAZARD	sll $0,$0,1	/* super scalar nop */
+#else
+#define MFC0_HAZARD	/* nothing */
 #endif
 
 #if _MIPS_ISA == _MIPS_ISA_MIPS1 || _MIPS_ISA == _MIPS_ISA_MIPS2 || \

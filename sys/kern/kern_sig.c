@@ -1,4 +1,4 @@
-/*	$NetBSD: kern_sig.c,v 1.327 2016/04/28 00:37:39 christos Exp $	*/
+/*	$NetBSD: kern_sig.c,v 1.332 2017/01/06 22:53:17 kamil Exp $	*/
 
 /*-
  * Copyright (c) 2006, 2007, 2008 The NetBSD Foundation, Inc.
@@ -70,7 +70,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: kern_sig.c,v 1.327 2016/04/28 00:37:39 christos Exp $");
+__KERNEL_RCSID(0, "$NetBSD: kern_sig.c,v 1.332 2017/01/06 22:53:17 kamil Exp $");
 
 #include "opt_ptrace.h"
 #include "opt_dtrace.h"
@@ -106,6 +106,7 @@ __KERNEL_RCSID(0, "$NetBSD: kern_sig.c,v 1.327 2016/04/28 00:37:39 christos Exp 
 
 #include <uvm/uvm_extern.h>
 
+#define	SIGQUEUE_MAX	32
 static pool_cache_t	sigacts_cache	__read_mostly;
 static pool_cache_t	ksiginfo_cache	__read_mostly;
 static callout_t	proc_stop_ch	__cacheline_aligned;
@@ -118,7 +119,7 @@ static void	ksiginfo_exechook(struct proc *, void *);
 static void	proc_stop_callout(void *);
 static int	sigchecktrace(void);
 static int	sigpost(struct lwp *, sig_t, int, int);
-static void	sigput(sigpend_t *, struct proc *, ksiginfo_t *);
+static int	sigput(sigpend_t *, struct proc *, ksiginfo_t *);
 static int	sigunwait(struct proc *, const ksiginfo_t *);
 static void	sigswitch(bool, int, int);
 
@@ -523,18 +524,21 @@ ksiginfo_queue_drain0(ksiginfoq_t *kq)
 	}
 }
 
-static bool
+static int
 siggetinfo(sigpend_t *sp, ksiginfo_t *out, int signo)
 {
-	ksiginfo_t *ksi;
+	ksiginfo_t *ksi, *nksi;
 
 	if (sp == NULL)
 		goto out;
 
 	/* Find siginfo and copy it out. */
-	TAILQ_FOREACH(ksi, &sp->sp_info, ksi_list) {
+	int count = 0;
+	TAILQ_FOREACH_SAFE(ksi, &sp->sp_info, ksi_list, nksi) {
 		if (ksi->ksi_signo != signo)
 			continue;
+		if (count++ > 0) /* Only remove the first, count all of them */
+			continue; 
 		TAILQ_REMOVE(&sp->sp_info, ksi, ksi_list);
 		KASSERT((ksi->ksi_flags & KSI_FROMPOOL) != 0);
 		KASSERT((ksi->ksi_flags & KSI_QUEUED) != 0);
@@ -543,9 +547,10 @@ siggetinfo(sigpend_t *sp, ksiginfo_t *out, int signo)
 			memcpy(out, ksi, sizeof(*out));
 			out->ksi_flags &= ~(KSI_FROMPOOL | KSI_QUEUED);
 		}
-		ksiginfo_free(ksi);	/* XXXSMP */
-		return true;
+		ksiginfo_free(ksi);
 	}
+	if (count)
+		return count;
 
 out:
 	/* If there is no siginfo, then manufacture it. */
@@ -554,7 +559,7 @@ out:
 		out->ksi_info._signo = signo;
 		out->ksi_info._code = SI_NOINFO;
 	}
-	return false;
+	return 0;
 }
 
 /*
@@ -568,6 +573,7 @@ int
 sigget(sigpend_t *sp, ksiginfo_t *out, int signo, const sigset_t *mask)
 {
 	sigset_t tset;
+	int count;
 
 	/* If there's no pending set, the signal is from the debugger. */
 	if (sp == NULL)
@@ -590,7 +596,9 @@ sigget(sigpend_t *sp, ksiginfo_t *out, int signo, const sigset_t *mask)
 
 	sigdelset(&sp->sp_set, signo);
 out:
-	(void)siggetinfo(sp, out, signo);
+	count = siggetinfo(sp, out, signo);
+	if (count > 1)
+		sigaddset(&sp->sp_set, signo);
 	return signo;
 }
 
@@ -599,7 +607,7 @@ out:
  *
  *	Append a new ksiginfo element to the list of pending ksiginfo's.
  */
-static void
+static int
 sigput(sigpend_t *sp, struct proc *p, ksiginfo_t *ksi)
 {
 	ksiginfo_t *kp;
@@ -613,25 +621,33 @@ sigput(sigpend_t *sp, struct proc *p, ksiginfo_t *ksi)
 	 * If there is no siginfo, we are done.
 	 */
 	if (KSI_EMPTY_P(ksi))
-		return;
+		return 0;
 
 	KASSERT((ksi->ksi_flags & KSI_FROMPOOL) != 0);
 
-#ifdef notyet	/* XXX: QUEUING */
-	if (ksi->ksi_signo < SIGRTMIN)
-#endif
-	{
-		TAILQ_FOREACH(kp, &sp->sp_info, ksi_list) {
-			if (kp->ksi_signo == ksi->ksi_signo) {
-				KSI_COPY(ksi, kp);
-				kp->ksi_flags |= KSI_QUEUED;
-				return;
-			}
+	size_t count = 0;
+	TAILQ_FOREACH(kp, &sp->sp_info, ksi_list) {
+		count++;
+		if (ksi->ksi_signo >= SIGRTMIN && ksi->ksi_signo <= SIGRTMAX)
+			continue;
+		if (kp->ksi_signo == ksi->ksi_signo) {
+			KSI_COPY(ksi, kp);
+			kp->ksi_flags |= KSI_QUEUED;
+			return 0;
 		}
 	}
-
+	
+	if (count >= SIGQUEUE_MAX) {
+#ifdef DIAGNOSTIC
+		printf("%s(%d): Signal queue is full signal=%d\n",
+		    p->p_comm, p->p_pid, ksi->ksi_signo);
+#endif
+		return EAGAIN;
+	}
 	ksi->ksi_flags |= KSI_QUEUED;
 	TAILQ_INSERT_TAIL(&sp->sp_info, ksi, ksi_list);
+	
+	return 0;
 }
 
 /*
@@ -897,14 +913,16 @@ trapsignal(struct lwp *l, ksiginfo_t *ksi)
 		kpsendsig(l, ksi, mask);
 		mutex_exit(p->p_lock);
 		if (ktrpoint(KTR_PSIG)) {
-			ktrpsig(signo, SIGACTION_PS(ps, signo).sa_handler,
-			    mask, ksi);
+			if (p->p_emul->e_ktrpsig)
+				p->p_emul->e_ktrpsig(signo,
+				    SIGACTION_PS(ps, signo).sa_handler,
+				    mask, ksi);
+			else
+				ktrpsig(signo, 
+				    SIGACTION_PS(ps, signo).sa_handler,
+				    mask, ksi);
 		}
 	} else {
-		/* XXX for core dump/debugger */
-		p->p_sigctx.ps_lwp = l->l_lid;
-		p->p_sigctx.ps_signo = ksi->ksi_signo;
-		p->p_sigctx.ps_code = ksi->ksi_trap;
 		kpsignal2(p, ksi);
 		mutex_exit(p->p_lock);
 		mutex_exit(proc_lock);
@@ -1195,7 +1213,7 @@ sigunwait(struct proc *p, const ksiginfo_t *ksi)
  *
  * Other ignored signals are discarded immediately.
  */
-void
+int
 kpsignal2(struct proc *p, ksiginfo_t *ksi)
 {
 	int prop, signo = ksi->ksi_signo;
@@ -1205,6 +1223,7 @@ kpsignal2(struct proc *p, ksiginfo_t *ksi)
 	lwpid_t lid;
 	sig_t action;
 	bool toall;
+	int error = 0;
 
 	KASSERT(!cpu_intr_p());
 	KASSERT(mutex_owned(proc_lock));
@@ -1217,7 +1236,11 @@ kpsignal2(struct proc *p, ksiginfo_t *ksi)
 	 * exiting, then just drop the signal here and bail out.
 	 */
 	if (p->p_stat != SACTIVE && p->p_stat != SSTOP)
-		return;
+		return 0;
+
+	/* XXX for core dump/debugger */
+	p->p_sigctx.ps_lwp = ksi->ksi_lid;
+	p->p_sigctx.ps_info = ksi->ksi_info;
 
 	/*
 	 * Notify any interested parties of the signal.
@@ -1245,7 +1268,8 @@ kpsignal2(struct proc *p, ksiginfo_t *ksi)
 			 */
 			if ((kp = ksiginfo_alloc(p, ksi, PR_NOWAIT)) == NULL)
 				goto discard;
-			sigput(&p->p_sigpend, p, kp);
+			if ((error = sigput(&p->p_sigpend, p, kp)) != 0)
+				goto out;
 		}
 	} else {
 		/*
@@ -1329,7 +1353,8 @@ kpsignal2(struct proc *p, ksiginfo_t *ksi)
 	if (lid != 0) {
 		l = lwp_find(p, lid);
 		if (l != NULL) {
-			sigput(&l->l_sigpend, p, kp);
+			if ((error = sigput(&l->l_sigpend, p, kp)) != 0)
+				goto out;
 			membar_producer();
 			(void)sigpost(l, action, prop, kp->ksi_signo);
 		}
@@ -1401,8 +1426,8 @@ kpsignal2(struct proc *p, ksiginfo_t *ksi)
 	 * Make signal pending.
 	 */
 	KASSERT((p->p_slflag & PSL_TRACED) == 0);
-	sigput(&p->p_sigpend, p, kp);
-
+	if ((error = sigput(&p->p_sigpend, p, kp)) != 0)
+		goto out;
 deliver:
 	/*
 	 * Before we set LW_PENDSIG on any LWP, ensure that the signal is
@@ -1426,9 +1451,10 @@ out:
 	 */
 	ksiginfo_free(kp);
 	if (signo == -1)
-		return;
+		return error;
 discard:
 	SDT_PROBE(proc, kernel, , signal__discard, l, p, signo, 0, 0);
+	return error;
 }
 
 void
@@ -1833,14 +1859,26 @@ postsig(int signo)
 	l->l_ru.ru_nsignals++;
 	if (l->l_sigpendset == NULL) {
 		/* From the debugger */
-		if (!siggetinfo(&l->l_sigpend, &ksi, signo))
-			(void)siggetinfo(&p->p_sigpend, &ksi, signo);
+		if (p->p_sigctx.ps_faked &&
+		    signo == p->p_sigctx.ps_info._signo) {
+			KSI_INIT(&ksi);
+			ksi.ksi_info = p->p_sigctx.ps_info;
+			ksi.ksi_lid = p->p_sigctx.ps_lwp;
+			p->p_sigctx.ps_faked = false;
+		} else {
+			if (!siggetinfo(&l->l_sigpend, &ksi, signo))
+				(void)siggetinfo(&p->p_sigpend, &ksi, signo);
+		}
 	} else
 		sigget(l->l_sigpendset, &ksi, signo, NULL);
 
 	if (ktrpoint(KTR_PSIG)) {
 		mutex_exit(p->p_lock);
-		ktrpsig(signo, action, returnmask, &ksi);
+		if (p->p_emul->e_ktrpsig)
+			p->p_emul->e_ktrpsig(signo, action,
+			    returnmask, &ksi);
+		else
+			ktrpsig(signo, action, returnmask, &ksi);
 		mutex_enter(p->p_lock);
 	}
 
@@ -1916,8 +1954,7 @@ sendsig_reset(struct lwp *l, int signo)
 	KASSERT(mutex_owned(p->p_lock));
 
 	p->p_sigctx.ps_lwp = 0;
-	p->p_sigctx.ps_code = 0;
-	p->p_sigctx.ps_signo = 0;
+	memset(&p->p_sigctx.ps_info, 0, sizeof(p->p_sigctx.ps_info));
 
 	mutex_enter(&ps->sa_mutex);
 	sigplusset(&SIGACTION_PS(ps, signo).sa_mask, &l->l_sigmask);
@@ -2022,7 +2059,9 @@ sigexit(struct lwp *l, int signo)
 
 	exitsig = signo;
 	p->p_acflag |= AXSIG;
-	p->p_sigctx.ps_signo = signo;
+	memset(&p->p_sigctx.ps_info, 0, sizeof(p->p_sigctx.ps_info));
+	p->p_sigctx.ps_info._signo = signo;
+	p->p_sigctx.ps_info._code = SI_NOINFO;
 
 	if (docore) {
 		mutex_exit(p->p_lock);

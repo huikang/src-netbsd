@@ -1,4 +1,4 @@
-#	$NetBSD: Makefile,v 1.167 2016/06/09 04:44:18 pgoyette Exp $
+#	$NetBSD: Makefile,v 1.188 2016/12/15 06:48:14 pgoyette Exp $
 
 .include <bsd.own.mk>
 
@@ -11,6 +11,10 @@ SUBDIR+=	aio
 SUBDIR+=	blowfish
 SUBDIR+=	bpf
 SUBDIR+=	bpf_filter
+SUBDIR+=	bufq_disksort
+SUBDIR+=	bufq_fcfs
+SUBDIR+=	bufq_priocscan
+SUBDIR+=	bufq_readprio
 SUBDIR+=	camellia
 SUBDIR+=	cast128
 SUBDIR+=	ccd
@@ -45,10 +49,24 @@ SUBDIR+=	hfs
 SUBDIR+=	hythygtemp
 SUBDIR+=	i2cexec
 SUBDIR+=	i2c_bitbang
+SUBDIR+=	if_agr
 SUBDIR+=	if_axe
 SUBDIR+=	if_axen
+SUBDIR+=	if_faith
+SUBDIR+=	if_gif
+SUBDIR+=	if_gre
+SUBDIR+=	if_loop
+SUBDIR+=	if_mpls
 SUBDIR+=	if_npflog
+SUBDIR+=	if_ppp
+SUBDIR+=	if_pppoe
+SUBDIR+=	if_sl
 SUBDIR+=	if_smsc
+SUBDIR+=	if_srt
+SUBDIR+=	if_stf
+SUBDIR+=	if_strip
+SUBDIR+=	if_tun tun
+SUBDIR+=	if_vlan
 SUBDIR+=	iic
 SUBDIR+=	ipl
 SUBDIR+=	kernfs
@@ -82,6 +100,8 @@ SUBDIR+=	pf
 SUBDIR+=	ppp_bsdcomp
 SUBDIR+=	ppp_deflate
 SUBDIR+=	procfs
+SUBDIR+=	ptrace
+SUBDIR+=	ptrace_common
 SUBDIR+=	ptyfs
 SUBDIR+=	puffs
 SUBDIR+=	putter
@@ -93,8 +113,11 @@ SUBDIR+=	secmodel_extensions
 SUBDIR+=	secmodel_overlay
 SUBDIR+=	securelevel
 SUBDIR+=	skipjack
+SUBDIR+=	slcompress
 SUBDIR+=	smbfs
 SUBDIR+=	spdmem
+SUBDIR+=	spkr
+SUBDIR+=	sppp_subr
 SUBDIR+=	sysmon
 SUBDIR+=	sysmon_envsys
 SUBDIR+=	sysmon_power
@@ -132,12 +155,15 @@ SUBDIR+=	xldscripts
 SUBDIR+=	exec_aout
 .endif
 
-.if ${MACHINE_ARCH} != "alpha" && ${MACHINE_CPU} != "aarch64"
+.if ${MACHINE_ARCH} != "alpha" && \
+    ${MACHINE_CPU} != "aarch64" && \
+    ${MACHINE_ARCH} != "ia64"
 SUBDIR+=	exec_elf32
 .endif
 
 .if ${MACHINE_CPU} == "aarch64" || \
     ${MACHINE_ARCH} == "alpha" || \
+    ${MACHINE_ARCH} == "ia64" || \
     ${MACHINE_ARCH} == "sparc64" || \
     ${MACHINE_ARCH} == "x86_64"
 SUBDIR+=	exec_elf64
@@ -215,16 +241,18 @@ SUBDIR+=	wmimsi
 .if ${MACHINE_CPU} == "arm" \
     || (!empty(MACHINE_ARCH:Mmips64*) && !defined(BSD_MK_COMPAT_FILE))
 SUBDIR+=	compat_netbsd32
-SUBDIR+=	compat_netbsd32_nfssrv
 SUBDIR+=	compat_netbsd32_mqueue
+SUBDIR+=	compat_netbsd32_nfssrv
+SUBDIR+=	compat_netbsd32_ptrace
 SUBDIR+=	compat_netbsd32_sysvipc
 .endif
 
 .if ${MACHINE_ARCH} == "x86_64"
 SUBDIR+=	compat_linux32
 SUBDIR+=	compat_netbsd32
-SUBDIR+=	compat_netbsd32_nfssrv
 SUBDIR+=	compat_netbsd32_mqueue
+SUBDIR+=	compat_netbsd32_nfssrv
+SUBDIR+=	compat_netbsd32_ptrace
 SUBDIR+=	compat_netbsd32_sysvipc
 .endif
 
@@ -338,11 +366,44 @@ SUBDIR+=	auvitek
 SUBDIR+=	coram
 SUBDIR+=	cxdtv
 SUBDIR+=	emdtv
-SUBDIR+=	spkr
 .endif
 
 .if (${MKISCSI} != "no")
 SUBDIR+=	iscsi
+.endif
+
+# For now, all of these are disabled, pending resolution of how to deal
+# with attachment-specific modules and bus-specific modules (as opposed
+# to machine- or architecture-specific modules)
+
+.if 0
+SUBDIR+=	aac
+SUBDIR+=	amr
+SUBDIR+=	ataraid
+SUBDIR+=	cac
+SUBDIR+=	cac_eisa
+SUBDIR+=	cac_pci
+SUBDIR+=	if_vioif
+SUBDIR+=	ld
+SUBDIR+=	ld_aac
+SUBDIR+=	ld_amr
+SUBDIR+=	ld_ataraid
+SUBDIR+=	ld_cac
+SUBDIR+=	ld_icp
+SUBDIR+=	ld_mlx
+SUBDIR+=	ld_sdmmc
+SUBDIR+=	ld_twa
+SUBDIR+=	ld_twe
+SUBDIR+=	ld_virtio
+SUBDIR+=	mlx
+SUBDIR+=	mlx_eisa
+SUBDIR+=	mlx_pci
+SUBDIR+=	ld_nvme
+SUBDIR+=	nvme
+SUBDIR+=	twa
+SUBDIR+=	twe
+SUBDIR+=	viomb
+SUBDIR+=	virtio
 .endif
 
 SUBDIR+=	examples	# build these regularly to avoid bit-rot

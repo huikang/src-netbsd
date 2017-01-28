@@ -1,4 +1,4 @@
-/*	$NetBSD: if_arcsubr.c,v 1.73 2016/04/28 14:40:09 ozaki-r Exp $	*/
+/*	$NetBSD: if_arcsubr.c,v 1.76 2017/01/24 18:37:20 maxv Exp $	*/
 
 /*
  * Copyright (c) 1994, 1995 Ignatios Souvatzis
@@ -35,7 +35,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_arcsubr.c,v 1.73 2016/04/28 14:40:09 ozaki-r Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_arcsubr.c,v 1.76 2017/01/24 18:37:20 maxv Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_inet.h"
@@ -46,8 +46,6 @@ __KERNEL_RCSID(0, "$NetBSD: if_arcsubr.c,v 1.73 2016/04/28 14:40:09 ozaki-r Exp 
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
-#include <sys/protosw.h>
-#include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/errno.h>
 #include <sys/syslog.h>
@@ -173,8 +171,10 @@ arc_output(struct ifnet *ifp, struct mbuf *m0, const struct sockaddr *dst,
 			adst = arcbroadcastaddr;
 		else {
 			uint8_t *tha = ar_tha(arph);
-			if (tha == NULL)
+			if (tha == NULL) {
+				m_freem(m);
 				return 0;
+			}
 			adst = *tha;
 		}
 
@@ -505,7 +505,6 @@ arc_input(struct ifnet *ifp, struct mbuf *m)
 	struct ifqueue *inq;
 	uint8_t atype;
 	int isr = 0;
-	int s;
 
 	if ((ifp->if_flags & IFF_UP) == 0) {
 		m_freem(m);
@@ -568,22 +567,23 @@ arc_input(struct ifnet *ifp, struct mbuf *m)
 		return;
 	}
 
-	s = splnet();
 	if (__predict_true(pktq)) {
 		if (__predict_false(!pktq_enqueue(pktq, m, 0))) {
 			m_freem(m);
 		}
-		splx(s);
 		return;
 	}
+
+	IFQ_LOCK(inq);
 	if (IF_QFULL(inq)) {
 		IF_DROP(inq);
+		IFQ_UNLOCK(inq);
 		m_freem(m);
 	} else {
 		IF_ENQUEUE(inq, m);
+		IFQ_UNLOCK(inq);
 		schednetisr(isr);
 	}
-	splx(s);
 }
 
 /*

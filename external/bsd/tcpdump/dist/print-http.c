@@ -11,6 +11,11 @@
  * FOR A PARTICULAR PURPOSE.
  */
 
+#include <sys/cdefs.h>
+#ifndef lint
+__RCSID("$NetBSD: print-http.c,v 1.2 2017/01/24 23:29:14 christos Exp $");
+#endif
+
 #ifndef lint
 static const char rcsid[] _U_ =
     "@(#) Header";
@@ -20,12 +25,12 @@ static const char rcsid[] _U_ =
 #include "config.h"
 #endif
 
-#include <tcpdump-stdinc.h>
+#include <netdissect-stdinc.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "interface.h"
+#include "netdissect.h"
 #include "extract.h"
 
 /*

@@ -1,4 +1,4 @@
-/*	$NetBSD: defs.h,v 1.95 2016/03/18 15:05:49 christos Exp $	*/
+/*	$NetBSD: defs.h,v 1.98 2016/09/09 21:09:11 christos Exp $	*/
 
 /*
  * Copyright (c) 1992, 1993
@@ -107,7 +107,7 @@ extern const char *progname;
  * The next two lines define the current version of the config(1) binary,
  * and the minimum version of the configuration files it supports.
  */
-#define CONFIG_VERSION		20151112
+#define CONFIG_VERSION		20160808
 #define CONFIG_MINVERSION	0
 
 /*
@@ -190,7 +190,8 @@ struct attr {
 #define	a_weight	a_m.m_weight
 
 	/* "interface attribute" */
-	int	a_iattr;		/* true => allows children */
+	uint8_t	a_iattr;		/* true => allows children */
+	uint8_t a_deselected;		/* deselected */	
 	struct	loclist *a_locs;	/* locators required */
 	int	a_loclen;		/* length of above list */
 	struct	nvlist *a_devs;		/* children */
@@ -569,9 +570,9 @@ void	deffilesystem(struct nvlist *, struct nvlist *);
 void	defoption(const char *, struct defoptlist *, struct nvlist *);
 void	defflag(const char *, struct defoptlist *, struct nvlist *, int);
 void	defparam(const char *, struct defoptlist *, struct nvlist *, int);
-void	deloption(const char *);
-void	delfsoption(const char *);
-void	delmkoption(const char *);
+void	deloption(const char *, int);
+void	delfsoption(const char *, int);
+void	delmkoption(const char *, int);
 int	devbase_has_instances(struct devbase *, int);
 int	is_declared_option(const char *);
 int	deva_has_instances(struct deva *, int);

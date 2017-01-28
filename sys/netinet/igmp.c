@@ -1,4 +1,4 @@
-/*	$NetBSD: igmp.c,v 1.61 2016/07/08 04:33:30 ozaki-r Exp $	*/
+/*	$NetBSD: igmp.c,v 1.64 2017/01/24 07:09:24 ozaki-r Exp $	*/
 
 /*
  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
@@ -40,17 +40,17 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: igmp.c,v 1.61 2016/07/08 04:33:30 ozaki-r Exp $");
+__KERNEL_RCSID(0, "$NetBSD: igmp.c,v 1.64 2017/01/24 07:09:24 ozaki-r Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_mrouting.h"
+#include "opt_net_mpsafe.h"
 #endif
 
 #include <sys/param.h>
 #include <sys/mbuf.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
-#include <sys/protosw.h>
 #include <sys/systm.h>
 #include <sys/cprng.h>
 #include <sys/sysctl.h>
@@ -361,9 +361,11 @@ igmp_input(struct mbuf *m, ...)
 		 * determine the arrival interface of an incoming packet.
 		 */
 		if ((ip->ip_src.s_addr & IN_CLASSA_NET) == 0) {
-			ia = in_get_ia_from_ifp(ifp);		/* XXX */
+			int s = pserialize_read_enter();
+			ia = in_get_ia_from_ifp(ifp); /* XXX */
 			if (ia)
 				ip->ip_src.s_addr = ia->ia_subnet;
+			pserialize_read_exit(s);
 		}
 
 		/*
@@ -394,26 +396,32 @@ igmp_input(struct mbuf *m, ...)
 		in_multi_unlock();
 		break;
 
-	case IGMP_v2_HOST_MEMBERSHIP_REPORT:
+	case IGMP_v2_HOST_MEMBERSHIP_REPORT: {
+		int s = pserialize_read_enter();
 #ifdef MROUTING
 		/*
 		 * Make sure we don't hear our own membership report.  Fast
 		 * leave requires knowing that we are the only member of a
 		 * group.
 		 */
-		ia = in_get_ia_from_ifp(ifp);			/* XXX */
-		if (ia && in_hosteq(ip->ip_src, ia->ia_addr.sin_addr))
+		ia = in_get_ia_from_ifp(ifp);	/* XXX */
+		if (ia && in_hosteq(ip->ip_src, ia->ia_addr.sin_addr)) {
+			pserialize_read_exit(s);
 			break;
+		}
 #endif
 
 		IGMP_STATINC(IGMP_STAT_RCV_REPORTS);
 
-		if (ifp->if_flags & IFF_LOOPBACK)
+		if (ifp->if_flags & IFF_LOOPBACK) {
+			pserialize_read_exit(s);
 			break;
+		}
 
 		if (!IN_MULTICAST(igmp->igmp_group.s_addr) ||
 		    !in_hosteq(igmp->igmp_group, ip->ip_dst)) {
 			IGMP_STATINC(IGMP_STAT_RCV_BADREPORTS);
+			pserialize_read_exit(s);
 			goto drop;
 		}
 
@@ -428,11 +436,12 @@ igmp_input(struct mbuf *m, ...)
 		 */
 		if ((ip->ip_src.s_addr & IN_CLASSA_NET) == 0) {
 #ifndef MROUTING
-			ia = in_get_ia_from_ifp(ifp);		/* XXX */
+			ia = in_get_ia_from_ifp(ifp); /* XXX */
 #endif
 			if (ia)
 				ip->ip_src.s_addr = ia->ia_subnet;
 		}
+		pserialize_read_exit(s);
 
 		/*
 		 * If we belong to the group being reported, stop
@@ -457,7 +466,7 @@ igmp_input(struct mbuf *m, ...)
 		}
 		in_multi_unlock();
 		break;
-
+	    }
 	}
 	m_put_rcvif_psref(ifp, &psref);
 
@@ -533,8 +542,10 @@ igmp_fasttimo(void)
 		return;
 	}
 
+#ifndef NET_MPSAFE
 	/* XXX: Needed for ip_output(). */
 	mutex_enter(softnet_lock);
+#endif
 
 	in_multi_lock(RW_WRITER);
 	igmp_timers_on = false;
@@ -558,7 +569,9 @@ igmp_fasttimo(void)
 		inm = in_next_multi(&step);
 	}
 	in_multi_unlock();
+#ifndef NET_MPSAFE
 	mutex_exit(softnet_lock);
+#endif
 }
 
 void
@@ -641,7 +654,9 @@ igmp_sendpkt(struct in_multi *inm, int type)
 	 * Note: IP_IGMP_MCAST indicates that in_multilock is held.
 	 * The caller must still acquire softnet_lock for ip_output().
 	 */
+#ifndef NET_MPSAFE
 	KASSERT(mutex_owned(softnet_lock));
+#endif
 	ip_output(m, NULL, NULL, IP_IGMP_MCAST, &imo, NULL);
 	IGMP_STATINC(IGMP_STAT_SND_REPORTS);
 }

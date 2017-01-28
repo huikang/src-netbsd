@@ -1,4 +1,4 @@
-/*	$NetBSD: ohci.c,v 1.263 2016/05/10 15:14:03 pooka Exp $	*/
+/*	$NetBSD: ohci.c,v 1.265 2016/12/04 10:12:35 skrll Exp $	*/
 
 /*
  * Copyright (c) 1998, 2004, 2005, 2012 The NetBSD Foundation, Inc.
@@ -41,7 +41,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ohci.c,v 1.263 2016/05/10 15:14:03 pooka Exp $");
+__KERNEL_RCSID(0, "$NetBSD: ohci.c,v 1.265 2016/12/04 10:12:35 skrll Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_usb.h"
@@ -786,7 +786,7 @@ ohci_init(ohci_softc_t *sc)
 	mutex_init(&sc->sc_intr_lock, MUTEX_DEFAULT, IPL_USB);
 	cv_init(&sc->sc_softwake_cv, "ohciab");
 
-	sc->sc_rhsc_si = softint_establish(SOFTINT_NET | SOFTINT_MPSAFE,
+	sc->sc_rhsc_si = softint_establish(SOFTINT_USB | SOFTINT_MPSAFE,
 	    ohci_rhsc_softint, sc);
 
 	for (i = 0; i < OHCI_HASH_SIZE; i++)
@@ -3538,7 +3538,7 @@ ohci_device_isoc_enter(struct usbd_xfer *xfer)
 	tail = opipe->tail.itd;
 	memset(&tail->itd, 0, sizeof(tail->itd));
 	tail->nextitd = NULL;
- 	tail->xfer = NULL;
+	tail->xfer = NULL;
 	usb_syncmem(&tail->dma, tail->offs, sizeof(tail->itd),
 	    BUS_DMASYNC_PREWRITE);
 
