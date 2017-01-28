@@ -1,4 +1,4 @@
-/*	$NetBSD: tmpfs_vnops.c,v 1.127 2016/03/12 12:21:37 martin Exp $	*/
+/*	$NetBSD: tmpfs_vnops.c,v 1.129 2017/01/11 12:12:32 joerg Exp $	*/
 
 /*
  * Copyright (c) 2005, 2006, 2007 The NetBSD Foundation, Inc.
@@ -35,7 +35,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: tmpfs_vnops.c,v 1.127 2016/03/12 12:21:37 martin Exp $");
+__KERNEL_RCSID(0, "$NetBSD: tmpfs_vnops.c,v 1.129 2017/01/11 12:12:32 joerg Exp $");
 
 #include <sys/param.h>
 #include <sys/dirent.h>
@@ -1071,7 +1071,6 @@ tmpfs_reclaim(void *v)
 
 	/* Disassociate inode from vnode. */
 	node->tn_vnode = NULL;
-	vcache_remove(vp->v_mount, &node, sizeof(node));
 	vp->v_data = NULL;
 
 	/* If inode is not referenced, i.e. no links, then destroy it. */
@@ -1245,11 +1244,6 @@ tmpfs_putpages(void *v)
 	if (vp->v_type != VREG) {
 		mutex_exit(vp->v_interlock);
 		return 0;
-	}
-
-	if ((vp->v_mount->mnt_flag & MNT_RDONLY) != 0) {
-		mutex_exit(vp->v_interlock);
-		return EROFS;
 	}
 
 	node = VP_TO_TMPFS_NODE(vp);

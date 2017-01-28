@@ -1,4 +1,4 @@
-/*	$NetBSD: trap.c,v 1.83 2015/12/13 15:53:05 maxv Exp $	*/
+/*	$NetBSD: trap.c,v 1.89 2017/01/18 05:11:59 kamil Exp $	*/
 
 /*-
  * Copyright (c) 1998, 2000 The NetBSD Foundation, Inc.
@@ -68,7 +68,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: trap.c,v 1.83 2015/12/13 15:53:05 maxv Exp $");
+__KERNEL_RCSID(0, "$NetBSD: trap.c,v 1.89 2017/01/18 05:11:59 kamil Exp $");
 
 #include "opt_ddb.h"
 #include "opt_kgdb.h"
@@ -230,7 +230,7 @@ trap(struct trapframe *frame)
 #endif
 	ksiginfo_t ksi;
 	void *onfault;
-	int type, error;
+	int type, error, wptnfo;
 	uint64_t cr2;
 	bool pfail;
 
@@ -374,7 +374,7 @@ kernelfault:
 		case 0x848e:	/* mov 0xa8(%rsp),%es (8e 84 24 a8 00 00 00) */
 		case 0x9c8e:	/* mov 0xb0(%rsp),%ds (8e 9c 24 b0 00 00 00) */
 			/*
-			 * We faulted loading one if the user segment registers.
+			 * We faulted loading one of the user segment registers.
 			 * The stack frame containing the user registers is
 			 * still valid and pointed to by tf_rsp.
 			 * Maybe we should check the iretq follows.
@@ -662,9 +662,10 @@ faultcommon:
 		}
 
 #ifdef TRAP_SIGDEBUG
-		printf("pid %d.%d (%s): signal %d at rip %lx addr %lx "
-		    "error %d\n", p->p_pid, l->l_lid, p->p_comm, ksi.ksi_signo,
-		    frame->tf_rip, va, error);
+		printf("pid %d.%d (%s): signal %d at rip %#lx addr %#lx "
+		    "error %d trap %d cr2 %p\n", p->p_pid, l->l_lid, p->p_comm,
+		    ksi.ksi_signo, frame->tf_rip, va, error, ksi.ksi_trap,
+		    ksi.ksi_addr);
 		frame_dump(frame);
 #endif
 		(*p->p_emul->e_trapsignal)(l, &ksi);
@@ -672,6 +673,19 @@ faultcommon:
 	}
 
 	case T_TRCTRAP:
+		/*
+		 * Ignore debug register trace traps due to
+		 * accesses in the user's address space, which
+		 * can happen under several conditions such as
+		 * if a user sets a watchpoint on a buffer and
+		 * then passes that buffer to a system call.
+		 * We still want to get TRCTRAPS for addresses
+		 * in kernel space because that is useful when
+		 * debugging the kernel.
+		 */
+		if (user_trap_x86_hw_watchpoint())
+			break;
+
 		/* Check whether they single-stepped into a lcall. */
 		if (frame->tf_rip == (uint64_t)IDTVEC(oosyscall) ||
 		    frame->tf_rip == (uint64_t)IDTVEC(osyscall) ||
@@ -692,7 +706,11 @@ faultcommon:
 			KSI_INIT_TRAP(&ksi);
 			ksi.ksi_signo = SIGTRAP;
 			ksi.ksi_trap = type & ~T_USER;
-			if (type == (T_BPTFLT|T_USER))
+			if ((wptnfo = user_trap_x86_hw_watchpoint())) {
+				ksi.ksi_code = TRAP_HWWPT;
+				ksi.ksi_trap2 = x86_hw_watchpoint_reg(wptnfo);
+				ksi.ksi_trap3 = x86_hw_watchpoint_type(wptnfo);
+			} else if (type == (T_BPTFLT|T_USER))
 				ksi.ksi_code = TRAP_BRKPT;
 			else
 				ksi.ksi_code = TRAP_TRACE;

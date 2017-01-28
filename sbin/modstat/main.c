@@ -1,4 +1,4 @@
-/*	$NetBSD: main.c,v 1.21 2015/12/02 00:56:09 pgoyette Exp $	*/
+/*	$NetBSD: main.c,v 1.24 2016/11/16 10:43:37 pgoyette Exp $	*/
 
 /*-
  * Copyright (c) 2008 The NetBSD Foundation, Inc.
@@ -28,7 +28,7 @@
 
 #include <sys/cdefs.h>
 #ifndef lint
-__RCSID("$NetBSD: main.c,v 1.21 2015/12/02 00:56:09 pgoyette Exp $");
+__RCSID("$NetBSD: main.c,v 1.24 2016/11/16 10:43:37 pgoyette Exp $");
 #endif /* !lint */
 
 #include <sys/module.h>
@@ -45,7 +45,6 @@ __RCSID("$NetBSD: main.c,v 1.21 2015/12/02 00:56:09 pgoyette Exp $");
 
 #include "prog_ops.h"
 
-int	main(int, char **);
 static void	usage(void) __dead;
 static int	modstatcmp(const void *, const void *);
 
@@ -55,7 +54,8 @@ static const char *classes[] = {
 	"vfs",
 	"driver",
 	"exec",
-	"secmodel"
+	"secmodel",
+	"bufq"
 };
 const unsigned int class_max = __arraycount(classes);
 
@@ -184,11 +184,11 @@ main(int argc, char **argv)
 		if (maxnamelen < namelen)
 			maxnamelen = namelen;
 	}
-	printf("%-*s %-8s %-8s %-4s %-5s ",
+	printf("%-*s %-8s %-8s %-4s %5s ",
 	    (int)maxnamelen, "NAME", "CLASS", "SOURCE", "FLAG", "REFS");
 	if (address)
 		printf("%-16s ", "ADDRESS");
-	printf("%-7s %s \n", "SIZE", "REQUIRES");
+	printf("%7s %s \n", "SIZE", "REQUIRES");
 	for (ms = iov.iov_base; len != 0; ms++, len--) {
 		const char *class;
 		const char *source;
@@ -215,13 +215,13 @@ main(int argc, char **argv)
 		else
 			source = "UNKNOWN";
 
-		printf("%-*s %-8s %-8s %-4s %-5d ",
+		printf("%-*s %-8s %-8s %-4s %5d ",
 		    (int)maxnamelen, ms->ms_name, class, source, 
 		    modflags[ms->ms_flags & (__arraycount(modflags) - 1)],
 		    ms->ms_refcnt);
 		if (address)
 			printf("%-16" PRIx64 " ", ms->ms_addr);
-		printf("%-7s %s\n", sbuf, ms->ms_required);
+		printf("%7s %s\n", sbuf, ms->ms_required);
 	}
 
 	exit(EXIT_SUCCESS);

@@ -1,4 +1,4 @@
-/*	$NetBSD: spec_vnops.c,v 1.162 2016/04/04 08:03:53 hannken Exp $	*/
+/*	$NetBSD: spec_vnops.c,v 1.168 2017/01/02 10:33:28 hannken Exp $	*/
 
 /*-
  * Copyright (c) 2008 The NetBSD Foundation, Inc.
@@ -58,7 +58,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: spec_vnops.c,v 1.162 2016/04/04 08:03:53 hannken Exp $");
+__KERNEL_RCSID(0, "$NetBSD: spec_vnops.c,v 1.168 2017/01/02 10:33:28 hannken Exp $");
 
 #include <sys/param.h>
 #include <sys/proc.h>
@@ -68,7 +68,7 @@ __KERNEL_RCSID(0, "$NetBSD: spec_vnops.c,v 1.162 2016/04/04 08:03:53 hannken Exp
 #include <sys/buf.h>
 #include <sys/mount.h>
 #include <sys/namei.h>
-#include <sys/vnode.h>
+#include <sys/vnode_impl.h>
 #include <sys/stat.h>
 #include <sys/errno.h>
 #include <sys/ioctl.h>
@@ -310,7 +310,7 @@ spec_node_lookup_by_dev(enum vtype type, dev_t dev, vnode_t **vpp)
 		mutex_enter(vp->v_interlock);
 	}
 	mutex_exit(&device_lock);
-	error = vget(vp, 0, true /* wait */);
+	error = vcache_vget(vp);
 	if (error != 0)
 		return error;
 	*vpp = vp;
@@ -345,7 +345,7 @@ spec_node_lookup_by_mount(struct mount *mp, vnode_t **vpp)
 	}
 	mutex_enter(vq->v_interlock);
 	mutex_exit(&device_lock);
-	error = vget(vq, 0, true /* wait */);
+	error = vcache_vget(vq);
 	if (error != 0)
 		return error;
 	*vpp = vq;
@@ -1090,10 +1090,9 @@ spec_reclaim(void *v)
 	struct vop_reclaim_args /* {
 		struct vnode *a_vp;
 	} */ *ap = v;
-	struct vnode *vp = ap->a_vp;
+	struct vnode *vp __diagused = ap->a_vp;
 
 	KASSERT(vp->v_mount == dead_rootmount);
-	vcache_remove(vp->v_mount, &vp->v_interlock, sizeof(vp->v_interlock));
 	return 0;
 }
 
@@ -1228,7 +1227,7 @@ spec_close(void *v)
 		sd->sd_bdevvp = NULL;
 	mutex_exit(&device_lock);
 
-	if (count != 0)
+	if (count != 0 && (vp->v_type != VCHR || !(cdev_flags(dev) & D_MCLOSE)))
 		return 0;
 
 	/*

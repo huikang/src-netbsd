@@ -1,4 +1,4 @@
-/*	$NetBSD: in6_ifattach.c,v 1.102 2016/07/20 07:37:51 ozaki-r Exp $	*/
+/*	$NetBSD: in6_ifattach.c,v 1.110 2017/01/24 07:09:25 ozaki-r Exp $	*/
 /*	$KAME: in6_ifattach.c,v 1.124 2001/07/18 08:32:51 jinmei Exp $	*/
 
 /*
@@ -31,7 +31,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: in6_ifattach.c,v 1.102 2016/07/20 07:37:51 ozaki-r Exp $");
+__KERNEL_RCSID(0, "$NetBSD: in6_ifattach.c,v 1.110 2017/01/24 07:09:25 ozaki-r Exp $");
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -320,30 +320,34 @@ int
 in6_get_hw_ifid(struct ifnet *ifp, struct in6_addr *in6)
 {
 	struct ifaddr *ifa;
-	const struct sockaddr_dl *sdl = NULL, *tsdl;
-	const char *addr;
-	size_t addrlen;
+	const struct sockaddr_dl *sdl = NULL;
+	const char *addr = NULL; /* XXX gcc 4.8 -Werror=maybe-uninitialized */
+	size_t addrlen = 0; /* XXX gcc 4.8 -Werror=maybe-uninitialized */
 	static u_int8_t allzero[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 	static u_int8_t allone[8] =
 		{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+	int s;
 
+	s = pserialize_read_enter();
 	IFADDR_READER_FOREACH(ifa, ifp) {
+		const struct sockaddr_dl *tsdl;
 		if (ifa->ifa_addr->sa_family != AF_LINK)
 			continue;
 		tsdl = satocsdl(ifa->ifa_addr);
 		if (tsdl == NULL || tsdl->sdl_alen == 0)
 			continue;
-		if (sdl == NULL || ifa == ifp->if_dl || ifa == ifp->if_hwdl)
+		if (sdl == NULL || ifa == ifp->if_dl || ifa == ifp->if_hwdl) {
 			sdl = tsdl;
+			addr = CLLADDR(sdl);
+			addrlen = sdl->sdl_alen;
+		}
 		if (ifa == ifp->if_hwdl)
 			break;
 	}
+	pserialize_read_exit(s);
 
 	if (sdl == NULL)
 		return -1;
-
-	addr = CLLADDR(sdl);
-	addrlen = sdl->sdl_alen;
 
 	switch (ifp->if_type) {
 	case IFT_IEEE1394:
@@ -488,6 +492,7 @@ get_ifid(struct ifnet *ifp0, struct ifnet *altifp,
 			nd6log(LOG_DEBUG,
 			    "%s: borrow interface identifier from %s\n",
 			    if_name(ifp0), if_name(ifp));
+			pserialize_read_exit(s);
 			goto success;
 		}
 	}
@@ -529,10 +534,8 @@ success:
 static int
 in6_ifattach_linklocal(struct ifnet *ifp, struct ifnet *altifp)
 {
-	struct in6_ifaddr *ia __diagused;
 	struct in6_aliasreq ifra;
-	struct nd_prefixctl prc0;
-	int i, error;
+	int error;
 
 	/*
 	 * configure link-local address.
@@ -573,8 +576,7 @@ in6_ifattach_linklocal(struct ifnet *ifp, struct ifnet *altifp)
 	 * we know there's no other link-local address on the interface
 	 * and therefore we are adding one (instead of updating one).
 	 */
-	if ((error = in6_update_ifa(ifp, &ifra, NULL,
-	    IN6_IFAUPDATE_DADDELAY)) != 0) {
+	if ((error = in6_update_ifa(ifp, &ifra, IN6_IFAUPDATE_DADDELAY)) != 0) {
 		/*
 		 * XXX: When the interface does not support IPv6, this call
 		 * would fail in the SIOCINITIFADDR ioctl.  I believe the
@@ -587,46 +589,6 @@ in6_ifattach_linklocal(struct ifnet *ifp, struct ifnet *altifp)
 			    "(errno=%d)\n",
 			    if_name(ifp), error);
 		return -1;
-	}
-
-	ia = in6ifa_ifpforlinklocal(ifp, 0); /* ia must not be NULL */
-	KASSERTMSG(ia, "ia == NULL in in6_ifattach_linklocal");
-
-	/*
-	 * Make the link-local prefix (fe80::/64%link) as on-link.
-	 * Since we'd like to manage prefixes separately from addresses,
-	 * we make an ND6 prefix structure for the link-local prefix,
-	 * and add it to the prefix list as a never-expire prefix.
-	 * XXX: this change might affect some existing code base...
-	 */
-	memset(&prc0, 0, sizeof(prc0));
-	prc0.ndprc_ifp = ifp;
-	/* this should be 64 at this moment. */
-	prc0.ndprc_plen = in6_mask2len(&ifra.ifra_prefixmask.sin6_addr, NULL);
-	prc0.ndprc_prefix = ifra.ifra_addr;
-	/* apply the mask for safety. (nd6_prelist_add will apply it again) */
-	for (i = 0; i < 4; i++) {
-		prc0.ndprc_prefix.sin6_addr.s6_addr32[i] &=
-		    in6mask64.s6_addr32[i];
-	}
-	/*
-	 * Initialize parameters.  The link-local prefix must always be
-	 * on-link, and its lifetimes never expire.
-	 */
-	prc0.ndprc_raf_onlink = 1;
-	prc0.ndprc_raf_auto = 1;	/* probably meaningless */
-	prc0.ndprc_vltime = ND6_INFINITE_LIFETIME;
-	prc0.ndprc_pltime = ND6_INFINITE_LIFETIME;
-	/*
-	 * Since there is no other link-local addresses, nd6_prefix_lookup()
-	 * probably returns NULL.  However, we cannot always expect the result.
-	 * For example, if we first remove the (only) existing link-local
-	 * address, and then reconfigure another one, the prefix is still
-	 * valid with referring to the old link-local address.
-	 */
-	if (nd6_prefix_lookup(&prc0) == NULL) {
-		if ((error = nd6_prelist_add(&prc0, NULL, NULL)) != 0)
-			return error;
 	}
 
 	return 0;
@@ -671,7 +633,7 @@ in6_ifattach_loopback(struct ifnet *ifp)
 	 * We are sure that this is a newly assigned address, so we can set
 	 * NULL to the 3rd arg.
 	 */
-	if ((error = in6_update_ifa(ifp, &ifra, NULL, 0)) != 0) {
+	if ((error = in6_update_ifa(ifp, &ifra, 0)) != 0) {
 		nd6log(LOG_ERR, "failed to configure "
 		    "the loopback address on %s (errno=%d)\n",
 		    if_name(ifp), error);
@@ -811,24 +773,29 @@ in6_ifattach(struct ifnet *ifp, struct ifnet *altifp)
 	 * XXX multiple loopback interface case.
 	 */
 	if ((ifp->if_flags & IFF_LOOPBACK) != 0) {
+		int s = pserialize_read_enter();
 		in6 = in6addr_loopback;
 		if (in6ifa_ifpwithaddr(ifp, &in6) == NULL) {
-			if (in6_ifattach_loopback(ifp) != 0)
+			if (in6_ifattach_loopback(ifp) != 0) {
+				pserialize_read_exit(s);
 				return;
+			}
 		}
+		pserialize_read_exit(s);
 	}
 
 	/*
 	 * assign a link-local address, if there's none.
 	 */
 	if (!(ND_IFINFO(ifp)->flags & ND6_IFF_IFDISABLED) &&
-	    ND_IFINFO(ifp)->flags & ND6_IFF_AUTO_LINKLOCAL)
-	{
+	    ND_IFINFO(ifp)->flags & ND6_IFF_AUTO_LINKLOCAL) {
+		int s = pserialize_read_enter();
 		ia = in6ifa_ifpforlinklocal(ifp, 0);
 		if (ia == NULL && in6_ifattach_linklocal(ifp, altifp) != 0) {
 			printf("%s: cannot assign link-local address\n",
 			    ifp->if_xname);
 		}
+		pserialize_read_exit(s);
 	}
 }
 
@@ -841,27 +808,19 @@ void
 in6_ifdetach(struct ifnet *ifp)
 {
 
-	/* remove ip6_mrouter stuff */
-	ip6_mrouter_detach(ifp);
-
-	/* remove neighbor management table */
-	nd6_purge(ifp, NULL);
-
 	/* nuke any of IPv6 addresses we have */
 	if_purgeaddrs(ifp, AF_INET6, in6_purgeaddr);
+
+	/* remove ip6_mrouter stuff */
+	ip6_mrouter_detach(ifp);
 
 	/* cleanup multicast address kludge table, if there is any */
 	in6_purgemkludge(ifp);
 
-	/*
-	 * remove neighbor management table.  we call it twice just to make
-	 * sure we nuke everything.  maybe we need just one call.
-	 * XXX: since the first call did not release addresses, some prefixes
-	 * might remain.  We should call nd6_purge() again to release the
-	 * prefixes after removing all addresses above.
-	 * (Or can we just delay calling nd6_purge until at this point?)
-	 */
+	/* remove neighbor management table */
 	nd6_purge(ifp, NULL);
+
+	nd6_assert_purged(ifp);
 }
 
 int
@@ -901,6 +860,7 @@ in6_tmpaddrtimer(void *ignored_arg)
 	struct ifnet *ifp;
 	int s;
 
+	/* XXX NOMPSAFE still need softnet_lock */
 	mutex_enter(softnet_lock);
 	KERNEL_LOCK(1, NULL);
 

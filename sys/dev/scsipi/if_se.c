@@ -1,4 +1,4 @@
-/*	$NetBSD: if_se.c,v 1.90 2016/06/10 13:27:15 ozaki-r Exp $	*/
+/*	$NetBSD: if_se.c,v 1.94 2016/12/15 09:28:06 ozaki-r Exp $	*/
 
 /*
  * Copyright (c) 1997 Ian W. Dall <ian.dall@dsto.defence.gov.au>
@@ -59,7 +59,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: if_se.c,v 1.90 2016/06/10 13:27:15 ozaki-r Exp $");
+__KERNEL_RCSID(0, "$NetBSD: if_se.c,v 1.94 2016/12/15 09:28:06 ozaki-r Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_inet.h"
@@ -203,7 +203,9 @@ static void	sedone(struct scsipi_xfer *, int);
 static int	se_ioctl(struct ifnet *, u_long, void *);
 static void	sewatchdog(struct ifnet *);
 
+#if 0
 static inline u_int16_t ether_cmp(void *, void *);
+#endif
 static void	se_recv(void *);
 static struct mbuf *se_get(struct se_softc *, char *, int);
 static int	se_read(struct se_softc *, char *, int);
@@ -267,6 +269,7 @@ const struct scsipi_inquiry_pattern se_patterns[] = {
 	 "Cabletrn",         "EA412",                 ""},
 };
 
+#if 0
 /*
  * Compare two Ether/802 addresses for equality, inlined and
  * unrolled for speed.
@@ -285,6 +288,7 @@ ether_cmp(void *one, void *two)
 }
 
 #define ETHER_CMP	ether_cmp
+#endif
 
 static int
 sematch(device_t parent, cfdata_t match, void *aux)
@@ -371,11 +375,9 @@ se_scsipi_cmd(struct scsipi_periph *periph, struct scsipi_generic *cmd,
     struct buf *bp, int flags)
 {
 	int error;
-	int s = splbio();
 
 	error = scsipi_command(periph, cmd, cmdlen, data_addr,
 	    datalen, retries, timeout, bp, flags);
-	splx(s);
 	return (error);
 }
 
@@ -444,8 +446,7 @@ se_ifstart(struct ifnet *ifp)
 	for (m = m0; m != NULL; ) {
 		memcpy(cp, mtod(m, u_char *), m->m_len);
 		cp += m->m_len;
-		MFREE(m, m0);
-		m = m0;
+		m = m0 = m_free(m);
 	}
 	if (len < SEMINSIZE) {
 #ifdef SEDEBUG
@@ -666,13 +667,6 @@ se_read(struct se_softc *sc, char *data, int datalen)
 		if ((ifp->if_flags & IFF_PROMISC) != 0) {
 			m_adj(m, SE_PREFIX);
 		}
-		ifp->if_ipackets++;
-
-		/*
-		 * Check if there's a BPF listener on this interface.
-		 * If so, hand off the raw packet to BPF.
-		 */
-		bpf_mtap(ifp, m);
 
 		/* Pass the packet up. */
 		if_input(ifp, m);

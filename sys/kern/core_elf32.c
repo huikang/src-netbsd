@@ -1,4 +1,4 @@
-/*	$NetBSD: core_elf32.c,v 1.47 2016/06/27 01:46:04 christos Exp $	*/
+/*	$NetBSD: core_elf32.c,v 1.51 2017/01/25 17:55:47 christos Exp $	*/
 
 /*
  * Copyright (c) 2001 Wasabi Systems, Inc.
@@ -40,7 +40,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(1, "$NetBSD: core_elf32.c,v 1.47 2016/06/27 01:46:04 christos Exp $");
+__KERNEL_RCSID(1, "$NetBSD: core_elf32.c,v 1.51 2017/01/25 17:55:47 christos Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_coredump.h"
@@ -357,8 +357,8 @@ coredump_note_procinfo(struct lwp *l, struct note_state *ns)
 	/* First, write an elfcore_procinfo. */
 	cpi.cpi_version = NETBSD_ELFCORE_PROCINFO_VERSION;
 	cpi.cpi_cpisize = sizeof(cpi);
-	cpi.cpi_signo = p->p_sigctx.ps_signo;
-	cpi.cpi_sigcode = p->p_sigctx.ps_code;
+	cpi.cpi_signo = p->p_sigctx.ps_info._signo;
+	cpi.cpi_sigcode = p->p_sigctx.ps_info._code;
 	cpi.cpi_siglwp = p->p_sigctx.ps_lwp;
 
 	/*
@@ -407,7 +407,6 @@ coredump_note_auxv(struct lwp *l, struct note_state *ns)
 	int error;
 	struct proc *p = l->l_proc;
 	void *uauxv, *kauxv;
-	size_t len;
 
 	if ((error = copyin_psstrings(p, &pss)) != 0)
 		return error;
@@ -415,18 +414,9 @@ coredump_note_auxv(struct lwp *l, struct note_state *ns)
 	if (pss.ps_envstr == NULL)
 		return EIO;
 
-	len = p->p_execsw->es_arglen;
-#ifdef COMPAT_NETBSD32
-	if (p->p_flag & PK_32) {
-		uauxv = (void *)((char *)pss.ps_envstr
-		    + (pss.ps_nenvstr + 1) * sizeof(int32_t));
-		len *= sizeof(int32_t);
-	} else
-#endif
-	{
-		uauxv = (void *)(pss.ps_envstr + pss.ps_nenvstr + 1);
-		len *= sizeof(char *);
-	}
+	size_t ptrsz = PROC_PTRSZ(p);
+	uauxv = (void *)((char *)pss.ps_envstr + (pss.ps_nenvstr + 1) * ptrsz);
+	size_t len = p->p_execsw->es_arglen;
 
 	kauxv = kmem_alloc(len, KM_SLEEP);
 	error = copyin_proc(p, uauxv, kauxv, len);
@@ -562,7 +552,7 @@ ELFNAMEEND(coredump_savenote)(struct note_state *ns, unsigned int type,
 #else	/* COREDUMP */
 
 int
-ELFNAMEEND(coredump)(struct lwp *l, void *cookie)
+ELFNAMEEND(coredump)(struct lwp *l, struct coredump_iostate *cookie)
 {
 
 	return ENOSYS;

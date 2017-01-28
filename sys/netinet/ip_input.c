@@ -1,4 +1,4 @@
-/*	$NetBSD: ip_input.c,v 1.338 2016/07/26 08:34:55 ozaki-r Exp $	*/
+/*	$NetBSD: ip_input.c,v 1.348 2017/01/24 07:09:24 ozaki-r Exp $	*/
 
 /*
  * Copyright (C) 1995, 1996, 1997, and 1998 WIDE Project.
@@ -91,7 +91,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ip_input.c,v 1.338 2016/07/26 08:34:55 ozaki-r Exp $");
+__KERNEL_RCSID(0, "$NetBSD: ip_input.c,v 1.348 2017/01/24 07:09:24 ozaki-r Exp $");
 
 #ifdef _KERNEL_OPT
 #include "opt_inet.h"
@@ -101,6 +101,7 @@ __KERNEL_RCSID(0, "$NetBSD: ip_input.c,v 1.338 2016/07/26 08:34:55 ozaki-r Exp $
 #include "opt_mrouting.h"
 #include "opt_mbuftrace.h"
 #include "opt_inet_csum.h"
+#include "opt_net_mpsafe.h"
 #endif
 
 #include "arp.h"
@@ -225,7 +226,7 @@ pfil_head_t *		inet_pfil_hook		__read_mostly;
 ipid_state_t *		ip_ids			__read_mostly;
 percpu_t *		ipstat_percpu		__read_mostly;
 
-static struct route	ipforward_rt		__cacheline_aligned;
+static percpu_t		*ipforward_rt_percpu	__cacheline_aligned;
 
 uint16_t ip_id;
 
@@ -286,7 +287,7 @@ static void		ipintr(void *);
 static void		ip_input(struct mbuf *);
 static void		ip_forward(struct mbuf *, int, struct ifnet *);
 static bool		ip_dooptions(struct mbuf *);
-static struct in_ifaddr *ip_rtaddr(struct in_addr);
+static struct in_ifaddr *ip_rtaddr(struct in_addr, struct psref *);
 static void		sysctl_net_inet_ip_setup(struct sysctllog **);
 
 static struct in_ifaddr	*ip_match_our_address(struct ifnet *, struct ip *,
@@ -294,9 +295,13 @@ static struct in_ifaddr	*ip_match_our_address(struct ifnet *, struct ip *,
 static struct in_ifaddr	*ip_match_our_address_broadcast(struct ifnet *,
 			    struct ip *);
 
-/* XXX: Not yet enabled. */
+#ifdef NET_MPSAFE
+#define	SOFTNET_LOCK()		mutex_enter(softnet_lock)
+#define	SOFTNET_UNLOCK()	mutex_exit(softnet_lock)
+#else
 #define	SOFTNET_LOCK()		KASSERT(mutex_owned(softnet_lock))
 #define	SOFTNET_UNLOCK()	KASSERT(mutex_owned(softnet_lock))
+#endif
 
 /*
  * IP initialization: fill in IP protocol switch table.
@@ -330,7 +335,6 @@ ip_init(void)
 	ip_ids = ip_id_init();
 	ip_id = time_uptime & 0xfffff;
 
-	ip_mtudisc_timeout_q = rt_timer_queue_create(ip_mtudisc_timeout);
 #ifdef GATEWAY
 	ipflow_init();
 #endif
@@ -345,6 +349,10 @@ ip_init(void)
 #endif /* MBUFTRACE */
 
 	ipstat_percpu = percpu_alloc(sizeof(uint64_t) * IP_NSTATS);
+
+	ipforward_rt_percpu = percpu_alloc(sizeof(struct route));
+	if (ipforward_rt_percpu == NULL)
+		panic("failed to allocate ipforward_rt_percpu");
 }
 
 static struct in_ifaddr *
@@ -378,7 +386,8 @@ ip_match_our_address(struct ifnet *ifp, struct ip *ip, int *downmatch)
 				continue;
 			if (checkif && ia->ia_ifp != ifp)
 				continue;
-			if ((ia->ia_ifp->if_flags & IFF_UP) != 0)
+			if ((ia->ia_ifp->if_flags & IFF_UP) != 0 &&
+			    (ia->ia4_flags & IN_IFF_DETACHED) == 0)
 				break;
 			else
 				(*downmatch)++;
@@ -398,7 +407,7 @@ ip_match_our_address_broadcast(struct ifnet *ifp, struct ip *ip)
 		if (ifa->ifa_addr->sa_family != AF_INET)
 			continue;
 		ia = ifatoia(ifa);
-		if (ia->ia4_flags & IN_IFF_NOTREADY)
+		if (ia->ia4_flags & (IN_IFF_NOTREADY | IN_IFF_DETACHED))
 			continue;
 		if (in_hosteq(ip->ip_dst, ia->ia_broadaddr.sin_addr) ||
 		    in_hosteq(ip->ip_dst, ia->ia_netbroadcast) ||
@@ -432,11 +441,15 @@ ipintr(void *arg __unused)
 
 	KASSERT(cpu_softintr_p());
 
+#ifndef NET_MPSAFE
 	mutex_enter(softnet_lock);
+#endif
 	while ((m = pktq_dequeue(ip_pktq)) != NULL) {
 		ip_input(m);
 	}
+#ifndef NET_MPSAFE
 	mutex_exit(softnet_lock);
+#endif
 }
 
 /*
@@ -447,12 +460,13 @@ static void
 ip_input(struct mbuf *m)
 {
 	struct ip *ip = NULL;
-	struct in_ifaddr *ia;
+	struct in_ifaddr *ia = NULL;
 	int hlen = 0, len;
 	int downmatch;
 	int srcrt = 0;
 	ifnet_t *ifp;
 	struct psref psref;
+	int s;
 
 	KASSERTMSG(cpu_softintr_p(), "ip_input: not in the software "
 	    "interrupt handler; synchronization assumptions violated");
@@ -608,10 +622,9 @@ ip_input(struct mbuf *m)
 		struct in_addr odst = ip->ip_dst;
 		bool freed;
 
-		SOFTNET_LOCK();
 		freed = pfil_run_hooks(inet_pfil_hook, &m, ifp, PFIL_IN) != 0;
-		SOFTNET_UNLOCK();
 		if (freed || m == NULL) {
+			m = NULL;
 			goto out;
 		}
 		ip = mtod(m, struct ip *);
@@ -641,6 +654,7 @@ ip_input(struct mbuf *m)
 		if ((*altq_input)(m, AF_INET) == 0) {
 			/* Packet dropped by traffic conditioner. */
 			SOFTNET_UNLOCK();
+			m = NULL;
 			goto out;
 		}
 		SOFTNET_UNLOCK();
@@ -654,8 +668,10 @@ ip_input(struct mbuf *m)
 	 * to be sent and the original packet to be freed).
 	 */
 	ip_nhops = 0;		/* for source routed packets */
-	if (hlen > sizeof (struct ip) && ip_dooptions(m))
+	if (hlen > sizeof (struct ip) && ip_dooptions(m)) {
+		m = NULL;
 		goto out;
+	}
 
 	/*
 	 * Check our list of addresses, to see if the packet is for us.
@@ -665,15 +681,21 @@ ip_input(struct mbuf *m)
 	 * or IN_IFF_NOTREADY addresses as not mine.
 	 */
 	downmatch = 0;
+	s = pserialize_read_enter();
 	ia = ip_match_our_address(ifp, ip, &downmatch);
-	if (ia != NULL)
+	if (ia != NULL) {
+		pserialize_read_exit(s);
 		goto ours;
+	}
 
 	if (ifp->if_flags & IFF_BROADCAST) {
 		ia = ip_match_our_address_broadcast(ifp, ip);
-		if (ia != NULL)
+		if (ia != NULL) {
+			pserialize_read_exit(s);
 			goto ours;
+		}
 	}
+	pserialize_read_exit(s);
 
 	if (IN_MULTICAST(ip->ip_dst.s_addr)) {
 #ifdef MROUTING
@@ -810,8 +832,17 @@ ours:
 	 * Switch out to protocol's input routine.
 	 */
 #if IFA_STATS
-	if (ia && ip)
-		ia->ia_ifa.ifa_data.ifad_inbytes += ntohs(ip->ip_len);
+	if (ia && ip) {
+		struct in_ifaddr *_ia;
+		/*
+		 * Keep a reference from ip_match_our_address with psref
+		 * is expensive, so explore ia here again.
+		 */
+		s = pserialize_read_enter();
+		_ia = in_get_ia(ip->ip_dst);
+		_ia->ia_ifa.ifa_data.ifad_inbytes += ntohs(ip->ip_len);
+		pserialize_read_exit(s);
+	}
 #endif
 	IP_STATINC(IP_STAT_DELIVERED);
 
@@ -835,13 +866,17 @@ void
 ip_slowtimo(void)
 {
 
+#ifndef NET_MPSAFE
 	mutex_enter(softnet_lock);
 	KERNEL_LOCK(1, NULL);
+#endif
 
 	ip_reass_slowtimo();
 
+#ifndef NET_MPSAFE
 	KERNEL_UNLOCK_ONE(NULL);
 	mutex_exit(softnet_lock);
+#endif
 }
 
 /*
@@ -873,6 +908,8 @@ ip_dooptions(struct mbuf *m)
 	int opt, optlen, cnt, off, code, type = ICMP_PARAMPROB, forward = 0;
 	struct in_addr dst;
 	n_time ntime;
+	struct ifaddr *ifa;
+	int s;
 
 	dst = ip->ip_dst;
 	cp = (u_char *)(ip + 1);
@@ -909,7 +946,8 @@ ip_dooptions(struct mbuf *m)
 		 * address is on directly accessible net.
 		 */
 		case IPOPT_LSRR:
-		case IPOPT_SSRR:
+		case IPOPT_SSRR: {
+			struct psref psref;
 			if (ip_allowsrcrt == 0) {
 				type = ICMP_UNREACH;
 				code = ICMP_UNREACH_NET_PROHIB;
@@ -924,8 +962,11 @@ ip_dooptions(struct mbuf *m)
 				goto bad;
 			}
 			ipaddr.sin_addr = ip->ip_dst;
-			ia = ifatoia(ifa_ifwithaddr(sintosa(&ipaddr)));
-			if (ia == 0) {
+
+			s = pserialize_read_enter();
+			ifa = ifa_ifwithaddr(sintosa(&ipaddr));
+			if (ifa == NULL) {
+				pserialize_read_exit(s);
 				if (opt == IPOPT_SSRR) {
 					type = ICMP_UNREACH;
 					code = ICMP_UNREACH_SRCFAIL;
@@ -937,6 +978,8 @@ ip_dooptions(struct mbuf *m)
 				 */
 				break;
 			}
+			pserialize_read_exit(s);
+
 			off--;			/* 0 origin */
 			if ((off + sizeof(struct in_addr)) > optlen) {
 				/*
@@ -950,11 +993,17 @@ ip_dooptions(struct mbuf *m)
 			 */
 			memcpy((void *)&ipaddr.sin_addr, (void *)(cp + off),
 			    sizeof(ipaddr.sin_addr));
-			if (opt == IPOPT_SSRR)
-				ia = ifatoia(ifa_ifwithladdr(sintosa(&ipaddr)));
-			else
-				ia = ip_rtaddr(ipaddr.sin_addr);
-			if (ia == 0) {
+			if (opt == IPOPT_SSRR) {
+				ifa = ifa_ifwithladdr_psref(sintosa(&ipaddr),
+				    &psref);
+				if (ifa != NULL)
+					ia = ifatoia(ifa);
+				else
+					ia = NULL;
+			} else {
+				ia = ip_rtaddr(ipaddr.sin_addr, &psref);
+			}
+			if (ia == NULL) {
 				type = ICMP_UNREACH;
 				code = ICMP_UNREACH_SRCFAIL;
 				goto bad;
@@ -962,14 +1011,17 @@ ip_dooptions(struct mbuf *m)
 			ip->ip_dst = ipaddr.sin_addr;
 			bcopy((void *)&ia->ia_addr.sin_addr,
 			    (void *)(cp + off), sizeof(struct in_addr));
+			ia4_release(ia, &psref);
 			cp[IPOPT_OFFSET] += sizeof(struct in_addr);
 			/*
 			 * Let ip_intr's mcast routing check handle mcast pkts
 			 */
 			forward = !IN_MULTICAST(ip->ip_dst.s_addr);
 			break;
+		    }
 
-		case IPOPT_RR:
+		case IPOPT_RR: {
+			struct psref psref;
 			if (optlen < IPOPT_OFFSET + sizeof(*cp)) {
 				code = &cp[IPOPT_OLEN] - (u_char *)ip;
 				goto bad;
@@ -990,17 +1042,23 @@ ip_dooptions(struct mbuf *m)
 			 * locate outgoing interface; if we're the destination,
 			 * use the incoming interface (should be same).
 			 */
-			if ((ia = ifatoia(ifa_ifwithaddr(sintosa(&ipaddr))))
-			    == NULL &&
-			    (ia = ip_rtaddr(ipaddr.sin_addr)) == NULL) {
-				type = ICMP_UNREACH;
-				code = ICMP_UNREACH_HOST;
-				goto bad;
+			ifa = ifa_ifwithaddr_psref(sintosa(&ipaddr), &psref);
+			if (ifa == NULL) {
+				ia = ip_rtaddr(ipaddr.sin_addr, &psref);
+				if (ia == NULL) {
+					type = ICMP_UNREACH;
+					code = ICMP_UNREACH_HOST;
+					goto bad;
+				}
+			} else {
+				ia = ifatoia(ifa);
 			}
 			bcopy((void *)&ia->ia_addr.sin_addr,
 			    (void *)(cp + off), sizeof(struct in_addr));
+			ia4_release(ia, &psref);
 			cp[IPOPT_OFFSET] += sizeof(struct in_addr);
 			break;
+		    }
 
 		case IPOPT_TS:
 			code = cp - (u_char *)ip;
@@ -1029,7 +1087,7 @@ ip_dooptions(struct mbuf *m)
 
 			case IPOPT_TS_TSANDADDR: {
 				struct ifnet *rcvif;
-				int s;
+				int _s, _ss;
 
 				if (ipt->ipt_ptr - 1 + sizeof(n_time) +
 				    sizeof(struct in_addr) > ipt->ipt_len) {
@@ -1038,14 +1096,18 @@ ip_dooptions(struct mbuf *m)
 					goto bad;
 				}
 				ipaddr.sin_addr = dst;
-				rcvif = m_get_rcvif(m, &s);
-				ia = ifatoia(ifaof_ifpforaddr(sintosa(&ipaddr),
-				    rcvif));
-				m_put_rcvif(rcvif, &s);
-				if (ia == 0)
-					continue;
+				_ss = pserialize_read_enter();
+				rcvif = m_get_rcvif(m, &_s);
+				ifa = ifaof_ifpforaddr(sintosa(&ipaddr), rcvif);
+				m_put_rcvif(rcvif, &_s);
+				if (ifa == NULL) {
+					pserialize_read_exit(_ss);
+					break;
+				}
+				ia = ifatoia(ifa);
 				bcopy(&ia->ia_addr.sin_addr,
 				    cp0, sizeof(struct in_addr));
+				pserialize_read_exit(_ss);
 				ipt->ipt_ptr += sizeof(struct in_addr);
 				break;
 			}
@@ -1059,9 +1121,13 @@ ip_dooptions(struct mbuf *m)
 				}
 				memcpy(&ipaddr.sin_addr, cp0,
 				    sizeof(struct in_addr));
-				if (ifatoia(ifa_ifwithaddr(sintosa(&ipaddr)))
-				    == NULL)
+				s = pserialize_read_enter();
+				ifa = ifa_ifwithaddr(sintosa(&ipaddr));
+				if (ifa == NULL) {
+					pserialize_read_exit(s);
 					continue;
+				}
+				pserialize_read_exit(s);
 				ipt->ipt_ptr += sizeof(struct in_addr);
 				break;
 
@@ -1080,7 +1146,7 @@ ip_dooptions(struct mbuf *m)
 	}
 	if (forward) {
 		struct ifnet *rcvif;
-		struct psref psref;
+		struct psref _psref;
 
 		if (ip_forwsrcrt == 0) {
 			type = ICMP_UNREACH;
@@ -1088,14 +1154,14 @@ ip_dooptions(struct mbuf *m)
 			goto bad;
 		}
 
-		rcvif = m_get_rcvif_psref(m, &psref);
+		rcvif = m_get_rcvif_psref(m, &_psref);
 		if (__predict_false(rcvif == NULL)) {
 			type = ICMP_UNREACH;
 			code = ICMP_UNREACH_HOST;
 			goto bad;
 		}
 		ip_forward(m, 1, rcvif);
-		m_put_rcvif_psref(rcvif, &psref);
+		m_put_rcvif_psref(rcvif, &_psref);
 		return true;
 	}
 	return false;
@@ -1110,21 +1176,27 @@ bad:
  * return internet address info of interface to be used to get there.
  */
 static struct in_ifaddr *
-ip_rtaddr(struct in_addr dst)
+ip_rtaddr(struct in_addr dst, struct psref *psref)
 {
 	struct rtentry *rt;
 	union {
 		struct sockaddr		dst;
 		struct sockaddr_in	dst4;
 	} u;
+	struct route *ro;
 
 	sockaddr_in_init(&u.dst4, &dst, 0);
 
-	SOFTNET_LOCK();
-	rt = rtcache_lookup(&ipforward_rt, &u.dst);
-	SOFTNET_UNLOCK();
-	if (rt == NULL)
+	ro = percpu_getref(ipforward_rt_percpu);
+	rt = rtcache_lookup(ro, &u.dst);
+	if (rt == NULL) {
+		percpu_putref(ipforward_rt_percpu);
 		return NULL;
+	}
+
+	ia4_acquire(ifatoia(rt->rt_ifa), psref);
+	rtcache_unref(rt, ro);
+	percpu_putref(ipforward_rt_percpu);
 
 	return ifatoia(rt->rt_ifa);
 }
@@ -1254,6 +1326,7 @@ ip_forward(struct mbuf *m, int srcrt, struct ifnet *rcvif)
 		struct sockaddr_in	dst4;
 	} u;
 	uint64_t *ips;
+	struct route *ro;
 
 	KASSERTMSG(cpu_softintr_p(), "ip_forward: not in the software "
 	    "interrupt handler; synchronization assumptions violated");
@@ -1275,19 +1348,18 @@ ip_forward(struct mbuf *m, int srcrt, struct ifnet *rcvif)
 		return;
 	}
 
-	SOFTNET_LOCK();
-
 	if (ip->ip_ttl <= IPTTLDEC) {
 		icmp_error(m, ICMP_TIMXCEED, ICMP_TIMXCEED_INTRANS, dest, 0);
-		SOFTNET_UNLOCK();
 		return;
 	}
 
 	sockaddr_in_init(&u.dst4, &ip->ip_dst, 0);
 
-	if ((rt = rtcache_lookup(&ipforward_rt, &u.dst)) == NULL) {
+	ro = percpu_getref(ipforward_rt_percpu);
+	rt = rtcache_lookup(ro, &u.dst);
+	if (rt == NULL) {
+		percpu_putref(ipforward_rt_percpu);
 		icmp_error(m, ICMP_UNREACH, ICMP_UNREACH_NET, dest, 0);
-		SOFTNET_UNLOCK();
 		return;
 	}
 
@@ -1329,8 +1401,9 @@ ip_forward(struct mbuf *m, int srcrt, struct ifnet *rcvif)
 			code = ICMP_REDIRECT_HOST;
 		}
 	}
+	rtcache_unref(rt, ro);
 
-	error = ip_output(m, NULL, &ipforward_rt,
+	error = ip_output(m, NULL, ro,
 	    (IP_FORWARDING | (ip_directedbcast ? IP_ALLOWBROADCAST : 0)),
 	    NULL, NULL);
 
@@ -1352,18 +1425,18 @@ ip_forward(struct mbuf *m, int srcrt, struct ifnet *rcvif)
 	if (mcopy) {
 #ifdef GATEWAY
 		if (mcopy->m_flags & M_CANFASTFWD)
-			ipflow_create(&ipforward_rt, mcopy);
+			ipflow_create(ro, mcopy);
 #endif
 		m_freem(mcopy);
 	}
 
-	SOFTNET_UNLOCK();
+	percpu_putref(ipforward_rt_percpu);
 	return;
 
 redirect:
 error:
 	if (mcopy == NULL) {
-		SOFTNET_UNLOCK();
+		percpu_putref(ipforward_rt_percpu);
 		return;
 	}
 
@@ -1386,8 +1459,10 @@ error:
 		type = ICMP_UNREACH;
 		code = ICMP_UNREACH_NEEDFRAG;
 
-		if ((rt = rtcache_validate(&ipforward_rt)) != NULL)
+		if ((rt = rtcache_validate(ro)) != NULL) {
 			destmtu = rt->rt_ifp->if_mtu;
+			rtcache_unref(rt, ro);
+		}
 #ifdef IPSEC
 		if (ipsec_used)
 			(void)ipsec4_forward(mcopy, &destmtu);
@@ -1404,11 +1479,11 @@ error:
 		 */
 		if (mcopy)
 			m_freem(mcopy);
-		SOFTNET_UNLOCK();
+		percpu_putref(ipforward_rt_percpu);
 		return;
 	}
 	icmp_error(mcopy, type, code, dest, destmtu);
-	SOFTNET_UNLOCK();
+	percpu_putref(ipforward_rt_percpu);
 }
 
 void
@@ -1532,6 +1607,7 @@ sysctl_net_inet_ip_pmtudto(SYSCTLFN_ARGS)
 	if (tmp < 0)
 		return (EINVAL);
 
+	/* XXX NOMPSAFE still need softnet_lock */
 	mutex_enter(softnet_lock);
 
 	ip_mtudisc_timeout = tmp;
