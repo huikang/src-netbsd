@@ -1311,12 +1311,12 @@ virtio_modcmd(modcmd_t cmd, void *opaque)
 #ifdef _MODULE
 	switch (cmd) {
 	case MODULE_CMD_INIT:
-		error = config_init_component(cfdriver_ioconf_virtio, 
-		    cfattach_ioconf_virtio, cfdata_ioconf_virtio); 
+		error = config_init_component(cfdriver_ioconf_pci_virtio, 
+		    cfattach_ioconf_pci_virtio, cfdata_ioconf_pci_virtio); 
 		break;
 	case MODULE_CMD_FINI:
-		error = config_fini_component(cfdriver_ioconf_virtio, 
-		    cfattach_ioconf_virtio, cfdata_ioconf_virtio);
+		error = config_fini_component(cfdriver_ioconf_pci_virtio, 
+		    cfattach_ioconf_pci_virtio, cfdata_ioconf_pci_virtio);
 		break;
 	default:
 		error = ENOTTY;

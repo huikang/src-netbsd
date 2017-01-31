@@ -635,11 +635,11 @@ ld_virtio_modcmd(modcmd_t cmd, void *opaque)
 	switch (cmd) {
 	case MODULE_CMD_INIT:
 		error = config_init_component(no_cfdriver_vec,
-		    cfattach_ioconf_ld_virtio, cfdata_ioconf_ld_virtio);
+		    cfattach_ioconf_virtio_ld, cfdata_ioconf_virtio_ld);
 		break;
 	case MODULE_CMD_FINI:
 		error = config_fini_component(no_cfdriver_vec,
-		    cfattach_ioconf_ld_virtio, cfdata_ioconf_ld_virtio);
+		    cfattach_ioconf_virtio_ld, cfdata_ioconf_virtio_ld);
 		break;
 	default:
 		error = ENOTTY;

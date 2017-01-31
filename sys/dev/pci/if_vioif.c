@@ -1530,12 +1530,12 @@ if_vioif_modcmd(modcmd_t cmd, void *opaque)
 #ifdef _MODULE
 	switch (cmd) {
 	case MODULE_CMD_INIT:
-		error = config_init_component(cfdriver_ioconf_if_vioif, 
-		    cfattach_ioconf_if_vioif, cfdata_ioconf_if_vioif); 
+		error = config_init_component(cfdriver_ioconf_virtio_if_vioif, 
+		    cfattach_ioconf_virtio_if_vioif, cfdata_ioconf_virtio_if_vioif); 
 		break;
 	case MODULE_CMD_FINI:
-		error = config_fini_component(cfdriver_ioconf_if_vioif,
-		    cfattach_ioconf_if_vioif, cfdata_ioconf_if_vioif);
+		error = config_fini_component(cfdriver_ioconf_virtio_if_vioif,
+		    cfattach_ioconf_virtio_if_vioif, cfdata_ioconf_virtio_if_vioif);
 		break;
 	default:
 		error = ENOTTY;
